@@ -212,7 +212,7 @@ describe('legal-entity HR scoping', () => {
       }
       const empMatch = url.match(/\/v2\/persons\/([^/]+)\/employments/);
       if (empMatch) {
-        const pid = empMatch[1];
+        const pid = empMatch[1] ?? '';
         return new Response(JSON.stringify({ _data: [{ id: `e-${pid}`, legal_entity: { id: personsByEntity[pid] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       if (url.includes('/v2/persons')) {
@@ -251,7 +251,7 @@ describe('legal-entity HR scoping', () => {
 
     // list_absences without personId filters to Spitze persons only (p1)
     const abs = await mcp.callTool({ name: 'personio_list_absences', arguments: {} });
-    const absData = JSON.parse((abs.content as Array<{ text: string }>)[0].text);
+    const absData = JSON.parse((abs.content as Array<{ text: string }>)[0]?.text ?? '{}');
     expect(absData._data.map((r: { id: string }) => r.id)).toEqual(['a1']);
   });
 
