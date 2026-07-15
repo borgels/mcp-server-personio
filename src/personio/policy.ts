@@ -55,7 +55,9 @@ const HR_TOOLS = new Set([
   'personio_whoami',
   'personio_list_persons',
   'personio_get_person',
+  'personio_create_person',
   'personio_update_person',
+  'personio_update_employment',
   'personio_list_absences',
   'personio_manage_absence',
   'personio_list_attendances',
@@ -64,8 +66,10 @@ const HR_TOOLS = new Set([
   'personio_list_projects',
   'personio_manage_project',
   'personio_list_compensations',
+  'personio_create_compensation',
   'personio_list_documents',
   'personio_upload_document',
+  'personio_manage_document',
   'personio_list_org_data',
   'personio_get_custom_report',
   'personio_list_recruiting',
@@ -78,11 +82,15 @@ export interface PersonioPolicyDecision {
 }
 
 const WRITE_TOOLS = new Set([
+  'personio_create_person',
   'personio_update_person',
+  'personio_update_employment',
   'personio_manage_absence',
   'personio_manage_attendance',
   'personio_manage_project',
+  'personio_create_compensation',
   'personio_upload_document',
+  'personio_manage_document',
 ]);
 
 export function checkToolPolicy(toolName: string): PersonioPolicyDecision {
