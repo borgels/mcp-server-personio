@@ -201,3 +201,69 @@ describe('compensation guardrails', () => {
     await expect(listCompensations(client, { scope: 'entries' })).rejects.toThrow('startDate');
   });
 });
+
+describe('legal-entity HR scoping', () => {
+  function scopedClient(personsByEntity: Record<string, string>): PersonioClient {
+    // personsByEntity: personId -> legalEntityId
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v2/auth/token')) {
+        return new Response(JSON.stringify({ access_token: 'v2', expires_in: 86400 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      const empMatch = url.match(/\/v2\/persons\/([^/]+)\/employments/);
+      if (empMatch) {
+        const pid = empMatch[1];
+        return new Response(JSON.stringify({ _data: [{ id: `e-${pid}`, legal_entity: { id: personsByEntity[pid] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.includes('/v2/persons')) {
+        return new Response(JSON.stringify({ _data: Object.keys(personsByEntity).map(id => ({ id, employments: [{ id: `e-${id}` }] })) }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.includes('/v2/absence-periods')) {
+        return new Response(JSON.stringify({ _data: [{ id: 'a1', person: { id: 'p1' } }, { id: 'a2', person: { id: 'p2' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ _data: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    return new PersonioClient({ clientId: 'i', clientSecret: 's', fetchImpl });
+  }
+
+  it('drops cross-entity leak tools and confines person-addressed tools when scoped', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_HR_LEGAL_ENTITY = '816055'; // Spitze
+    const client = scopedClient({ p1: '816055', p2: '816056' }); // p1 Spitze, p2 Borgels
+
+    const server = createServer({ client });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+
+    const tools = (await mcp.listTools()).tools.map(t => t.name);
+    expect(tools).not.toContain('personio_get_custom_report');
+    expect(tools).not.toContain('personio_list_recruiting');
+    expect(tools).toContain('personio_get_person');
+
+    // p1 (Spitze) allowed
+    const ok = await mcp.callTool({ name: 'personio_get_person', arguments: { personId: 'p1' } });
+    expect(ok.isError).toBeFalsy();
+    // p2 (Borgels) rejected
+    const bad = await mcp.callTool({ name: 'personio_get_person', arguments: { personId: 'p2' } });
+    expect(bad.isError).toBe(true);
+    expect((bad.content as Array<{ text: string }>)[0]?.text).toContain('legal entity');
+
+    // list_absences without personId filters to Spitze persons only (p1)
+    const abs = await mcp.callTool({ name: 'personio_list_absences', arguments: {} });
+    const absData = JSON.parse((abs.content as Array<{ text: string }>)[0].text);
+    expect(absData._data.map((r: { id: string }) => r.id)).toEqual(['a1']);
+  });
+
+  it('unscoped (all) HR keeps the full tool set', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_HR_LEGAL_ENTITY = 'all';
+    const server = createServer({ client: scopedClient({ p1: '816055' }) });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+    const tools = (await mcp.listTools()).tools.map(t => t.name);
+    expect(tools).toContain('personio_get_custom_report');
+    expect(tools).toContain('personio_list_recruiting');
+  });
+});

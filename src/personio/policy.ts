@@ -102,6 +102,20 @@ export function checkToolPolicy(toolName: string): PersonioPolicyDecision {
   return { allowed: true, reason: `allowed in ${profile()} profile` };
 }
 
+/**
+ * Tools that can expose employees OUTSIDE the instance's legal entity and
+ * cannot be safely confined server-side (custom reports bypass the
+ * attribute whitelist; recruiting isn't legal-entity scoped). They are
+ * dropped on a legal-entity-scoped HR instance.
+ */
+const CROSS_ENTITY_LEAK_TOOLS = new Set(['personio_get_custom_report', 'personio_list_recruiting']);
+
 export function toolNamesForProfile(): Set<string> {
-  return profile() === 'hr' ? HR_TOOLS : EMPLOYEE_TOOLS;
+  if (profile() !== 'hr') {
+    return EMPLOYEE_TOOLS;
+  }
+  if (!process.env.PERSONIO_HR_LEGAL_ENTITY || process.env.PERSONIO_HR_LEGAL_ENTITY.trim().toLowerCase() === 'all') {
+    return HR_TOOLS;
+  }
+  return new Set([...HR_TOOLS].filter(t => !CROSS_ENTITY_LEAK_TOOLS.has(t)));
 }
