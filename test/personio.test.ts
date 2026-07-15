@@ -267,3 +267,36 @@ describe('legal-entity HR scoping', () => {
     expect(tools).toContain('personio_list_recruiting');
   });
 });
+
+describe('expanded HR write tools', () => {
+  it('exposes create/employment/compensation/document tools in the HR profile', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_ENABLE_WRITES = 'true';
+    delete process.env.PERSONIO_HR_LEGAL_ENTITY;
+    const server = createServer({ client: makeClient([]) });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+    const tools = (await mcp.listTools()).tools.map(t => t.name);
+    for (const t of ['personio_create_person', 'personio_update_employment', 'personio_create_compensation', 'personio_manage_document']) {
+      expect(tools).toContain(t);
+    }
+  });
+
+  it('scoped create_person forces the instance legal entity into the create payload', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_ENABLE_WRITES = 'true';
+    process.env.PERSONIO_HR_LEGAL_ENTITY = '816055';
+    const record: Recorded[] = [];
+    const client = makeClient(record, url => (url.match(/\/employments/) ? { _data: [{ id: 'e1' }] } : { id: 'newp', _data: [{ id: 'e1' }] }));
+    const server = createServer({ client });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+
+    await mcp.callTool({ name: 'personio_create_person', arguments: { firstName: 'A', lastName: 'B', email: 'ab@example.com', legalEntityId: '999999', employmentStartDate: '2026-09-01' } });
+    const post = record.find(r => r.method === 'POST' && r.url.endsWith('/v2/persons'));
+    expect(post?.body).toContain('816055'); // forced to Spitze, not the 999999 the caller passed
+    expect(post?.body).not.toContain('999999');
+  });
+});

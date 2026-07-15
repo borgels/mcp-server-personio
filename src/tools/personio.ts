@@ -14,6 +14,8 @@ import { hrLegalEntity, LegalEntityScope } from '../personio/scope.js';
 import {
   createAbsence,
   createAttendance,
+  createCompensation,
+  createPerson,
   deleteAbsence,
   deleteAttendance,
   getAbsenceBalance,
@@ -29,7 +31,11 @@ import {
   listPersons,
   listProjects,
   listRecruiting,
+  manageDocument,
   manageProject,
+  updateAbsence,
+  updateAttendance,
+  updateEmployment,
   updatePerson,
   uploadDocument,
 } from '../personio/resources.js';
@@ -334,6 +340,58 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
   );
 
   register(
+    'personio_create_person',
+    {
+      title: 'Create Employee (Personio, HR)',
+      description:
+        'Create a new employee (person + initial employment) with legal entity, start date, and optionally position, weekly hours, and supervisor. On a company-scoped instance the legal entity is forced to that company. Email cannot be changed later. Requires write access.',
+      inputSchema: {
+        firstName: z.string().trim().min(1),
+        lastName: z.string().trim().min(1),
+        email: z.string().trim().email().optional().describe('Work email (unique, immutable). Omit for employees without an email.'),
+        legalEntityId: z.string().trim().min(1).optional().describe('Legal entity id; ignored/forced on a company-scoped instance.'),
+        employmentStartDate: dateSchema,
+        position: z.string().trim().optional(),
+        weeklyWorkingHours: z.number().min(0).max(168).optional(),
+        supervisorId: z.string().trim().optional(),
+      },
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async input =>
+      run('personio_create_person', options, input, async () => {
+        const legalEntityId = scope ? scope.entityId : input.legalEntityId;
+        if (!legalEntityId) {
+          throw new Error('legalEntityId is required (which company does this employee belong to?).');
+        }
+        return jsonResult(await createPerson(client, { ...input, legalEntityId }));
+      }),
+  );
+
+  register(
+    'personio_update_employment',
+    {
+      title: 'Update Employment (Personio, HR)',
+      description:
+        'Change a person’s employment: position, supervisor ({id}), weekly_working_hours, cost_centers, office ({id}), org_units, employment_start_date, probation_end_date, and — for OFFBOARDING — employment_end_date + termination. Send the fields to change in patch (Personio employment field names). Company transfers (changing legal_entity) are only allowed on the all-companies instance. Requires write access.',
+      inputSchema: {
+        personId: z.string().trim().min(1),
+        patch: z.record(z.string(), z.unknown()).describe('Employment fields to change, e.g. {"position":"Senior Consultant"} or {"employment_end_date":"2026-12-31"}.'),
+      },
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async input =>
+      run('personio_update_employment', options, input, async () => {
+        if (scope) {
+          await scope.assert(input.personId, 'personio_update_employment');
+          if ('legal_entity' in input.patch) {
+            throw new Error('Changing legal entity (company transfer) is only allowed on the all-companies HR instance.');
+          }
+        }
+        return jsonResult(await updateEmployment(client, input));
+      }),
+  );
+
+  register(
     'personio_list_absences',
     {
       title: 'List Absences (Personio, HR)',
@@ -372,7 +430,7 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       description:
         'Create an absence period for any person, or delete one. Always enters the approval workflow; pending requests are approved in the UI. Requires write access.',
       inputSchema: {
-        action: z.enum(['create', 'delete']),
+        action: z.enum(['create', 'update', 'delete']),
         personId: z.string().trim().optional(),
         absenceTypeId: z.string().trim().optional(),
         startDate: dateSchema.optional(),
@@ -380,7 +438,8 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
         endDate: dateSchema.optional(),
         endHalf: halfSchema,
         comment: z.string().trim().optional(),
-        absencePeriodId: z.string().trim().optional().describe('Required for delete.'),
+        absencePeriodId: z.string().trim().optional().describe('Required for update/delete.'),
+        patch: z.record(z.string(), z.unknown()).optional().describe('Fields to change for update.'),
       },
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
@@ -391,6 +450,12 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
             throw new Error('absencePeriodId is required for delete.');
           }
           return jsonResult(await deleteAbsence(client, { absencePeriodId: input.absencePeriodId }));
+        }
+        if (input.action === 'update') {
+          if (!input.absencePeriodId) {
+            throw new Error('absencePeriodId is required for update.');
+          }
+          return jsonResult(await updateAbsence(client, { absencePeriodId: input.absencePeriodId, patch: input.patch ?? {} }));
         }
         if (!input.personId || !input.absenceTypeId || !input.startDate) {
           throw new Error('personId, absenceTypeId, and startDate are required for create.');
@@ -443,14 +508,15 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       title: 'Manage Attendance (Personio, HR)',
       description: 'Create or delete an attendance period for any person. Approval workflow always applies. Requires write access.',
       inputSchema: {
-        action: z.enum(['create', 'delete']),
+        action: z.enum(['create', 'update', 'delete']),
         personId: z.string().trim().optional(),
         type: z.enum(['WORK', 'BREAK']).optional(),
         start: z.string().trim().optional(),
         end: z.string().trim().optional(),
         projectId: z.string().trim().optional(),
         comment: z.string().trim().optional(),
-        attendancePeriodId: z.string().trim().optional().describe('Required for delete.'),
+        attendancePeriodId: z.string().trim().optional().describe('Required for update/delete.'),
+        patch: z.record(z.string(), z.unknown()).optional().describe('Fields to change for update.'),
       },
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
@@ -461,6 +527,12 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
             throw new Error('attendancePeriodId is required for delete.');
           }
           return jsonResult(await deleteAttendance(client, { attendancePeriodId: input.attendancePeriodId }));
+        }
+        if (input.action === 'update') {
+          if (!input.attendancePeriodId) {
+            throw new Error('attendancePeriodId is required for update.');
+          }
+          return jsonResult(await updateAttendance(client, { attendancePeriodId: input.attendancePeriodId, patch: input.patch ?? {} }));
         }
         if (!input.personId || !input.type || !input.start || !input.end) {
           throw new Error('personId, type, start, and end are required for create.');
@@ -521,6 +593,31 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
   );
 
   register(
+    'personio_create_compensation',
+    {
+      title: 'Create Compensation (Personio, HR)',
+      description:
+        'Add a compensation entry for a person: FIXED_SALARY, HOURLY_SALARY, ONE_TIME, or RECURRING (with interval). WARNING: Personio has NO API to edit or delete a compensation once created — double-check amount/date before running. Requires write access.',
+      inputSchema: {
+        personId: z.string().trim().min(1),
+        type: z.enum(['FIXED_SALARY', 'HOURLY_SALARY', 'ONE_TIME', 'RECURRING']),
+        amount: z.number(),
+        currency: z.string().trim().length(3).optional().describe('ISO currency, default DKK.'),
+        interval: z.enum(['MONTHLY', 'QUARTERLY', 'HALF_YEARLY', 'YEARLY']).optional().describe('Required for RECURRING.'),
+        effectiveDate: dateSchema,
+        note: z.string().trim().optional(),
+      },
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async input =>
+      run('personio_create_compensation', options, input, async () => {
+        if (scope) await scope.assert(input.personId, 'personio_create_compensation');
+        const legalEntityId = scope ? scope.entityId : undefined;
+        return jsonResult(await createCompensation(client, { ...input, legalEntityId }));
+      }),
+  );
+
+  register(
     'personio_list_documents',
     {
       title: 'List/Download Documents (Personio, HR)',
@@ -562,6 +659,25 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
     },
     async input =>
       run('personio_upload_document', options, input, async () => jsonResult(await uploadDocument(client, input))),
+  );
+
+  register(
+    'personio_manage_document',
+    {
+      title: 'Update/Delete Document (Personio, HR)',
+      description:
+        'Update a document’s metadata (title, category) or delete it. Deletion is permanent. Requires write access. (Uploading is personio_upload_document.)',
+      inputSchema: {
+        action: z.enum(['update', 'delete']),
+        documentId: z.string().trim().min(1),
+        patch: z.record(z.string(), z.unknown()).optional().describe('Metadata to change for update.'),
+      },
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async input =>
+      run('personio_manage_document', options, input, async () =>
+        jsonResult(await manageDocument(client, input)),
+      ),
   );
 
   register(

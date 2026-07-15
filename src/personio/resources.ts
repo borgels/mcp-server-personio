@@ -59,6 +59,106 @@ export async function updatePerson(
   return client.patch(`/v2/persons/${encodeURIComponent(input.personId)}`, input.patch);
 }
 
+export interface CreatePersonInput {
+  firstName: string;
+  lastName: string;
+  email?: string;
+  legalEntityId: string;
+  employmentStartDate: string;
+  position?: string;
+  weeklyWorkingHours?: number;
+  supervisorId?: string;
+}
+
+/** Create an employee (person + initial employment) and set its legal entity + start date. */
+export async function createPerson(client: PersonioClient, input: CreatePersonInput): Promise<unknown> {
+  assertWritesEnabled('personio_create_person');
+  const employment: Record<string, unknown> = {
+    legal_entity: { id: input.legalEntityId },
+    employment_start_date: input.employmentStartDate,
+  };
+  if (input.position) employment.position = input.position;
+  if (input.weeklyWorkingHours !== undefined) employment.weekly_working_hours = input.weeklyWorkingHours;
+  if (input.supervisorId) employment.supervisor = { id: input.supervisorId };
+
+  const created = await client.post<{ id?: string; _data?: { id?: string } }>('/v2/persons', {
+    first_name: input.firstName,
+    last_name: input.lastName,
+    ...(input.email ? { email: input.email } : {}),
+    employments: [employment],
+  });
+  const personId = created.id ?? created._data?.id;
+  if (!personId) {
+    return created;
+  }
+  // Ensure the employment carries the legal entity + start date (create may not persist them).
+  const emps = await client.get<{ _data?: Array<{ id?: string }> }>(`/v2/persons/${personId}/employments`);
+  const employmentId = emps._data?.[0]?.id;
+  if (employmentId) {
+    await client.patch(`/v2/persons/${personId}/employments/${employmentId}`, employment).catch(() => undefined);
+  }
+  return client.get(`/v2/persons/${personId}`, undefined);
+}
+
+/** Resolve a person's (first) employment id. */
+async function firstEmploymentId(client: PersonioClient, personId: string): Promise<string> {
+  const emps = await client.get<{ _data?: Array<{ id?: string }> }>(
+    `/v2/persons/${encodeURIComponent(personId)}/employments`,
+  );
+  const id = emps._data?.[0]?.id;
+  if (!id) {
+    throw new Error(`No employment found for person ${personId}.`);
+  }
+  return id;
+}
+
+export interface UpdateEmploymentInput {
+  personId: string;
+  employmentId?: string;
+  /** Employment fields to change: position, supervisor:{id}, weekly_working_hours, cost_centers,
+   *  office:{id}, org_units, employment_start_date, probation_end_date, employment_end_date,
+   *  termination:{...}, type. legal_entity transfers are blocked on legal-entity-scoped instances. */
+  patch: Record<string, unknown>;
+}
+
+export async function updateEmployment(client: PersonioClient, input: UpdateEmploymentInput): Promise<unknown> {
+  assertWritesEnabled('personio_update_employment');
+  const employmentId = input.employmentId ?? (await firstEmploymentId(client, input.personId));
+  return client.patch(
+    `/v2/persons/${encodeURIComponent(input.personId)}/employments/${encodeURIComponent(employmentId)}`,
+    input.patch,
+  );
+}
+
+export interface CreateCompensationInput {
+  personId: string;
+  legalEntityId?: string;
+  /** FIXED_SALARY | HOURLY_SALARY | ONE_TIME | RECURRING */
+  type: string;
+  amount: number;
+  currency?: string;
+  /** For recurring: MONTHLY | QUARTERLY | HALF_YEARLY | YEARLY */
+  interval?: string;
+  effectiveDate: string;
+  note?: string;
+}
+
+/** Create a compensation entry. NOTE: Personio has no API to edit or delete compensation afterwards. */
+export async function createCompensation(client: PersonioClient, input: CreateCompensationInput): Promise<unknown> {
+  assertWritesEnabled('personio_create_compensation');
+  const body: Record<string, unknown> = {
+    person: { id: input.personId },
+    type: input.type,
+    amount: input.amount,
+    currency: input.currency ?? 'DKK',
+    effective_date: input.effectiveDate,
+  };
+  if (input.interval) body.interval = input.interval;
+  if (input.legalEntityId) body.legal_entity = { id: input.legalEntityId };
+  if (input.note) body.note = input.note;
+  return client.post('/v2/compensations', body);
+}
+
 // --- Absences ---
 
 export interface ListAbsencesInput extends CursorInput {
@@ -108,6 +208,13 @@ export async function createAbsence(client: PersonioClient, input: CreateAbsence
 
 export async function deleteAbsence(client: PersonioClient, input: { absencePeriodId: string }): Promise<unknown> {
   return client.delete(`/v2/absence-periods/${encodeURIComponent(input.absencePeriodId)}`);
+}
+
+export async function updateAbsence(
+  client: PersonioClient,
+  input: { absencePeriodId: string; patch: Record<string, unknown> },
+): Promise<unknown> {
+  return client.patch(`/v2/absence-periods/${encodeURIComponent(input.absencePeriodId)}`, input.patch);
 }
 
 export async function listAbsenceTypes(client: PersonioClient, input: CursorInput = {}): Promise<unknown> {
@@ -173,6 +280,13 @@ export async function deleteAttendance(
   input: { attendancePeriodId: string },
 ): Promise<unknown> {
   return client.delete(`/v2/attendance-periods/${encodeURIComponent(input.attendancePeriodId)}`);
+}
+
+export async function updateAttendance(
+  client: PersonioClient,
+  input: { attendancePeriodId: string; patch: Record<string, unknown> },
+): Promise<unknown> {
+  return client.patch(`/v2/attendance-periods/${encodeURIComponent(input.attendancePeriodId)}`, input.patch);
 }
 
 // --- Projects ---
@@ -290,7 +404,19 @@ export async function uploadDocument(client: PersonioClient, input: UploadDocume
   );
 }
 
-// --- Compensation (read-only: API-created entries cannot be updated or deleted) ---
+export async function manageDocument(
+  client: PersonioClient,
+  input: { action: 'update' | 'delete'; documentId: string; patch?: Record<string, unknown> },
+): Promise<unknown> {
+  assertWritesEnabled('personio_manage_document');
+  const path = `/v2/document-management/documents/${encodeURIComponent(input.documentId)}`;
+  if (input.action === 'delete') {
+    return client.delete(path);
+  }
+  return client.patch(path, input.patch ?? {});
+}
+
+// --- Compensation (create only: API-created entries cannot be updated or deleted) ---
 
 export interface ListCompensationsInput extends CursorInput {
   scope: 'entries' | 'types' | 'jobs' | 'salary-bands';
