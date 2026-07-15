@@ -10,6 +10,7 @@ import {
 import type { PersonioClient } from '../personio/client.js';
 import { resolvePerson, type ResolvedPerson } from '../personio/identity.js';
 import { checkToolPolicy, profile, toolNamesForProfile } from '../personio/policy.js';
+import { hrLegalEntity, LegalEntityScope } from '../personio/scope.js';
 import {
   createAbsence,
   createAttendance,
@@ -59,6 +60,14 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
     resolvedPromise ??= resolvePerson(client, options.onBehalfOf);
     return resolvedPromise;
   };
+
+  // Legal-entity scoping (HR profile only): confine every person-addressed
+  // tool to employees of one legal entity. Enforced here because Personio's
+  // API has no legal-entity filter on most endpoints.
+  const entityId = profile() === 'hr' ? hrLegalEntity() : undefined;
+  const scope = entityId ? new LegalEntityScope(client, entityId) : undefined;
+  const rows = (data: unknown): Array<Record<string, unknown>> =>
+    Array.isArray((data as { _data?: unknown })?._data) ? ((data as { _data: Array<Record<string, unknown>> })._data) : [];
 
   const register: typeof server.registerTool = (name, config, handler) => {
     if (!available.has(name)) {
@@ -278,7 +287,13 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: READ_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_list_persons', options, input, async () => jsonResult(await listPersons(client, input))),
+      run('personio_list_persons', options, input, async () => {
+        const res = await listPersons(client, input);
+        if (scope) {
+          (res as { _data?: unknown[] })._data = await scope.filter(rows(res), r => String(r.id ?? ''));
+        }
+        return jsonResult(res);
+      }),
   );
 
   register(
@@ -293,7 +308,10 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: READ_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_get_person', options, input, async () => jsonResult(await getPerson(client, input))),
+      run('personio_get_person', options, input, async () => {
+        if (scope) await scope.assert(input.personId, 'personio_get_person');
+        return jsonResult(await getPerson(client, input));
+      }),
   );
 
   register(
@@ -309,7 +327,10 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_update_person', options, input, async () => jsonResult(await updatePerson(client, input))),
+      run('personio_update_person', options, input, async () => {
+        if (scope) await scope.assert(input.personId, 'personio_update_person');
+        return jsonResult(await updatePerson(client, input));
+      }),
   );
 
   register(
@@ -332,7 +353,15 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
         if (input.balanceForEmail) {
           return jsonResult(await getAbsenceBalance(client, input.balanceForEmail));
         }
-        return jsonResult(await listAbsences(client, input));
+        if (scope && input.personId) await scope.assert(input.personId, 'personio_list_absences');
+        const res = await listAbsences(client, input);
+        if (scope && !input.personId) {
+          (res as { _data?: unknown[] })._data = await scope.filter(
+            rows(res),
+            r => String((r.person as { id?: string })?.id ?? ''),
+          );
+        }
+        return jsonResult(res);
       }),
   );
 
@@ -366,6 +395,7 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
         if (!input.personId || !input.absenceTypeId || !input.startDate) {
           throw new Error('personId, absenceTypeId, and startDate are required for create.');
         }
+        if (scope) await scope.assert(input.personId, 'personio_manage_absence');
         return jsonResult(
           await createAbsence(client, {
             personId: input.personId,
@@ -394,7 +424,17 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: READ_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_list_attendances', options, input, async () => jsonResult(await listAttendances(client, input))),
+      run('personio_list_attendances', options, input, async () => {
+        if (scope && input.personId) await scope.assert(input.personId, 'personio_list_attendances');
+        const res = await listAttendances(client, input);
+        if (scope && !input.personId) {
+          (res as { _data?: unknown[] })._data = await scope.filter(
+            rows(res),
+            r => String((r.person as { id?: string })?.id ?? ''),
+          );
+        }
+        return jsonResult(res);
+      }),
   );
 
   register(
@@ -425,6 +465,7 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
         if (!input.personId || !input.type || !input.start || !input.end) {
           throw new Error('personId, type, start, and end are required for create.');
         }
+        if (scope) await scope.assert(input.personId, 'personio_manage_attendance');
         return jsonResult(
           await createAttendance(client, {
             personId: input.personId,
@@ -472,7 +513,11 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: READ_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_list_compensations', options, input, async () => jsonResult(await listCompensations(client, input))),
+      run('personio_list_compensations', options, input, async () => {
+        // On a scoped instance, force the legal-entity filter so entries can't span companies.
+        const scoped = scope ? { ...input, legalEntityId: scope.entityId } : input;
+        return jsonResult(await listCompensations(client, scoped));
+      }),
   );
 
   register(
@@ -491,7 +536,10 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: READ_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_list_documents', options, input, async () => jsonResult(await listDocuments(client, input))),
+      run('personio_list_documents', options, input, async () => {
+        if (scope) await scope.assert(input.ownerId, 'personio_list_documents');
+        return jsonResult(await listDocuments(client, input));
+      }),
   );
 
   register(
