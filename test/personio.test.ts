@@ -333,3 +333,21 @@ describe('expanded HR write tools', () => {
     });
   });
 });
+
+describe('error messages you can act on', () => {
+  it('reads the v2 problem shape, not just v1 (#78020)', async () => {
+    const { PersonioHttpError } = await import('../src/errors.js');
+    const error = new PersonioHttpError({
+      status: 400,
+      url: 'https://api.personio.de/v2/persons',
+      payload: {
+        personio_trace_id: 'abc-123',
+        errors: [{ title: 'Bad Request', detail: 'supervisor must be an active person', _meta: { path: '/v2/persons' } }],
+      },
+    });
+    expect(error.message).toContain('HTTP 400');
+    expect(error.message).toContain('Bad Request: supervisor must be an active person');
+    expect(error.message).toContain('/v2/persons');
+    expect(error.message).toContain('trace=abc-123');
+  });
+});
