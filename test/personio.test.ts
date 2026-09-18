@@ -299,4 +299,37 @@ describe('expanded HR write tools', () => {
     expect(post?.body).toContain('816055'); // forced to Spitze, not the 999999 the caller passed
     expect(post?.body).not.toContain('999999');
   });
+
+  it('creates an external consultant with contract end date and department', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_ENABLE_WRITES = 'true';
+    process.env.PERSONIO_HR_LEGAL_ENTITY = '816060';
+    const record: Recorded[] = [];
+    const client = makeClient(record, url => (url.match(/\/employments/) ? { _data: [{ id: 'e1' }] } : { id: 'newp', _data: [{ id: 'e1' }] }));
+    const server = createServer({ client });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+
+    await mcp.callTool({
+      name: 'personio_create_person',
+      arguments: {
+        firstName: 'Malene',
+        lastName: 'Ege',
+        email: 'moe@example.com',
+        employmentStartDate: '2026-10-01',
+        employmentType: 'EXTERNAL',
+        contractEndDate: '2027-03-31',
+        orgUnitIds: ['11971431'],
+      },
+    });
+    const post = record.find(r => r.method === 'POST' && r.url.endsWith('/v2/persons'));
+    const body = JSON.parse(post?.body ?? '{}');
+    expect(body.employments[0]).toMatchObject({
+      type: 'EXTERNAL',
+      contract_end_date: '2027-03-31',
+      legal_entity: { id: '816060' },
+      org_units: [{ id: '11971431' }],
+    });
+  });
 });
