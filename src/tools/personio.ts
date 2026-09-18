@@ -389,10 +389,10 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
     {
       title: 'Update Employment (Personio, HR)',
       description:
-        'Change a person’s employment: position, supervisor ({id}), weekly_working_hours, cost_centers, office ({id}), org_units, employment_start_date, probation_end_date, and — for OFFBOARDING — employment_end_date + termination. Send the fields to change in patch (Personio employment field names). Company transfers (changing legal_entity) are only allowed on the all-companies instance. Requires write access.',
+        'Change a person’s employment: position, supervisor ({id}), weekly_working_hours, cost_centers, office ({id}), org_units, employment_start_date, probation_end_date, and — for OFFBOARDING — employment_end_date + termination. Send the fields to change in patch (Personio employment field names — note position is {"title":"..."}, supervisor is {"id":"..."}). Company transfers (changing legal_entity) are only allowed on the all-companies instance. Requires write access.',
       inputSchema: {
         personId: z.string().trim().min(1),
-        patch: z.record(z.string(), z.unknown()).describe('Employment fields to change, e.g. {"position":"Senior Consultant"} or {"employment_end_date":"2026-12-31"}.'),
+        patch: z.record(z.string(), z.unknown()).describe('Employment fields to change, e.g. {"position":{"title":"Senior Consultant"}} or {"employment_end_date":"2026-12-31"}.'),
       },
       annotations: WRITE_TOOL_ANNOTATIONS,
     },

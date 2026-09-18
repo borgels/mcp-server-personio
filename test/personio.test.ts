@@ -351,3 +351,30 @@ describe('error messages you can act on', () => {
     expect(error.message).toContain('trace=abc-123');
   });
 });
+
+describe('the employment shapes the API actually defines', () => {
+  it('sends position as {title}, not a bare string (#78020)', async () => {
+    process.env.PERSONIO_PROFILE = 'hr';
+    process.env.PERSONIO_ENABLE_WRITES = 'true';
+    delete process.env.PERSONIO_HR_LEGAL_ENTITY;
+    const record: Recorded[] = [];
+    const client = makeClient(record, url => (url.match(/\/employments/) ? { _data: [{ id: 'e1' }] } : { id: 'p1', _data: [{ id: 'e1' }] }));
+    const server = createServer({ client });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: 't', version: '0' });
+    await Promise.all([server.connect(st), mcp.connect(ct)]);
+
+    await mcp.callTool({
+      name: 'personio_create_person',
+      arguments: {
+        firstName: 'Malene',
+        lastName: 'Ege',
+        legalEntityId: '816060',
+        employmentStartDate: '2026-09-18',
+        position: 'Senior People & Culture Consultant',
+      },
+    });
+    const post = record.find(r => r.method === 'POST' && r.url.endsWith('/v2/persons'));
+    expect(JSON.parse(post?.body ?? '{}').employments[0].position).toEqual({ title: 'Senior People & Culture Consultant' });
+  });
+});
