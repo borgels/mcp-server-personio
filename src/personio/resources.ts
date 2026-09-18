@@ -85,7 +85,11 @@ export async function createPerson(client: PersonioClient, input: CreatePersonIn
     legal_entity: { id: input.legalEntityId },
     employment_start_date: input.employmentStartDate,
   };
-  if (input.position) employment.position = input.position;
+  // The API's employment shape is position: {title}, not a bare string — a read
+  // of any employment shows it, and the docs say so. Sending the string got a
+  // bare `HTTP 400` with no body to explain it, which cost a whole afternoon
+  // (#78020).
+  if (input.position) employment.position = { title: input.position };
   if (input.weeklyWorkingHours !== undefined) employment.weekly_working_hours = input.weeklyWorkingHours;
   if (input.supervisorId) employment.supervisor = { id: input.supervisorId };
   // EXTERNAL is what makes a consultant a consultant in Personio: it is the
@@ -138,7 +142,7 @@ async function firstEmploymentId(client: PersonioClient, personId: string): Prom
 export interface UpdateEmploymentInput {
   personId: string;
   employmentId?: string;
-  /** Employment fields to change: position, supervisor:{id}, weekly_working_hours, cost_centers,
+  /** Employment fields to change: position:{title}, supervisor:{id}, weekly_working_hours, cost_centers,
    *  office:{id}, org_units, employment_start_date, probation_end_date, employment_end_date,
    *  termination:{...}, type. legal_entity transfers are blocked on legal-entity-scoped instances. */
   patch: Record<string, unknown>;
