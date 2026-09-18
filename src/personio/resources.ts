@@ -68,6 +68,14 @@ export interface CreatePersonInput {
   position?: string;
   weeklyWorkingHours?: number;
   supervisorId?: string;
+  /** INTERNAL = employee, EXTERNAL = consultant/contractor. Personio defaults to INTERNAL. */
+  employmentType?: 'INTERNAL' | 'EXTERNAL';
+  /** End of a temporary contract or consultancy assignment (YYYY-MM-DD). */
+  contractEndDate?: string;
+  /** Department/team org unit ids (personio_list_org_data). */
+  orgUnitIds?: string[];
+  /** Custom attributes to set on the new profile, e.g. occupation type. */
+  customAttributes?: Array<{ id: string; value: unknown }>;
 }
 
 /** Create an employee (person + initial employment) and set its legal entity + start date. */
@@ -80,6 +88,12 @@ export async function createPerson(client: PersonioClient, input: CreatePersonIn
   if (input.position) employment.position = input.position;
   if (input.weeklyWorkingHours !== undefined) employment.weekly_working_hours = input.weeklyWorkingHours;
   if (input.supervisorId) employment.supervisor = { id: input.supervisorId };
+  // EXTERNAL is what makes a consultant a consultant in Personio: it is the
+  // attribute an access role's assignment rule keys on, so getting it right at
+  // creation is what grants the correct (and only the correct) access.
+  if (input.employmentType) employment.type = input.employmentType;
+  if (input.contractEndDate) employment.contract_end_date = input.contractEndDate;
+  if (input.orgUnitIds?.length) employment.org_units = input.orgUnitIds.map(id => ({ id }));
 
   const created = await client.post<{ id?: string; _data?: { id?: string } }>('/v2/persons', {
     first_name: input.firstName,
@@ -90,6 +104,15 @@ export async function createPerson(client: PersonioClient, input: CreatePersonIn
   const personId = created.id ?? created._data?.id;
   if (!personId) {
     return created;
+  }
+  // Custom attributes are not accepted by the create call, and they are what an
+  // access role's assignment rule usually keys on (occupation type, and the
+  // like), so they are set right away rather than left to a second tool call
+  // the caller might forget.
+  if (input.customAttributes?.length) {
+    await client.patch(`/v2/persons/${personId}`, {
+      custom_attributes: input.customAttributes.map(a => ({ id: a.id, value: a.value })),
+    });
   }
   // Ensure the employment carries the legal entity + start date (create may not persist them).
   const emps = await client.get<{ _data?: Array<{ id?: string }> }>(`/v2/persons/${personId}/employments`);

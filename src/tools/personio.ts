@@ -344,7 +344,7 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
     {
       title: 'Create Employee (Personio, HR)',
       description:
-        'Create a new employee (person + initial employment) with legal entity, start date, and optionally position, weekly hours, and supervisor. On a company-scoped instance the legal entity is forced to that company. Email cannot be changed later. Requires write access.',
+        'Create a new employee (person + initial employment) with legal entity, start date, and optionally position, weekly hours, supervisor, employment type, contract end date and department/team. On a company-scoped instance the legal entity is forced to that company. Email cannot be changed later. Requires write access.',
       inputSchema: {
         firstName: z.string().trim().min(1),
         lastName: z.string().trim().min(1),
@@ -354,6 +354,23 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
         position: z.string().trim().optional(),
         weeklyWorkingHours: z.number().min(0).max(168).optional(),
         supervisorId: z.string().trim().optional(),
+        employmentType: z
+          .enum(['INTERNAL', 'EXTERNAL'])
+          .optional()
+          .describe('INTERNAL = employee (default), EXTERNAL = external consultant/contractor. Access roles are assigned from this together with the legal entity, so set it deliberately.'),
+        contractEndDate: dateSchema
+          .optional()
+          .describe('End of a temporary contract or consultancy assignment (YYYY-MM-DD). Leave empty for open-ended employment.'),
+        orgUnitIds: z
+          .array(z.string().trim().min(1))
+          .max(10)
+          .optional()
+          .describe('Department/team org unit ids (see personio_list_org_data).'),
+        customAttributes: z
+          .array(z.object({ id: z.string().trim().min(1), value: z.union([z.string(), z.number(), z.boolean()]) }))
+          .max(20)
+          .optional()
+          .describe('Custom attributes to set on the new profile, e.g. occupation type (ids from personio_list_attributes). Access roles are often assigned from these, so set the ones the company uses.'),
       },
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
