@@ -63,11 +63,37 @@ function formatPersonioHttpError(input: {
     `Personio API request failed with HTTP ${input.status}`,
     payload?.error_human ?? payload?.error,
     payload?.message,
+    // v2 answers in its own shape — {errors:[{title, detail}], personio_trace_id}
+    // — and none of the v1 keys above are present in it. Unread, a v2 failure
+    // collapsed to bare "HTTP 400" with nothing to act on, which is how a
+    // create_person failure became undiagnosable (#78020).
+    ...v2Problems(input.payload),
     input.retryAfter ? `retry-after=${input.retryAfter}s` : undefined,
     input.fallbackMessage,
   ].filter(Boolean);
 
   return redactSecrets(parts.join(' | '));
+}
+
+/** The `errors` array and trace id of a v2 problem response, as readable lines. */
+function v2Problems(payload: unknown): string[] {
+  if (typeof payload !== 'object' || payload === null) return [];
+  const body = payload as { errors?: unknown; personio_trace_id?: unknown };
+  const lines = Array.isArray(body.errors)
+    ? body.errors
+        .map(entry => {
+          if (typeof entry !== 'object' || entry === null) return undefined;
+          const e = entry as { title?: unknown; detail?: unknown; _meta?: { path?: unknown } };
+          const where = typeof e._meta?.path === 'string' ? ` (${e._meta.path})` : '';
+          const text = [e.title, e.detail].filter(v => typeof v === 'string' && v.length > 0).join(': ');
+          return text ? `${text}${where}` : undefined;
+        })
+        .filter((line): line is string => line !== undefined)
+    : [];
+  if (typeof body.personio_trace_id === 'string' && lines.length > 0) {
+    lines.push(`trace=${body.personio_trace_id}`);
+  }
+  return lines;
 }
 
 function isPersonioErrorPayload(value: unknown): value is PersonioErrorPayload {
