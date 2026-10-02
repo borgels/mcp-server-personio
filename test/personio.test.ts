@@ -228,8 +228,8 @@ describe('legal-entity HR scoping', () => {
 
   it('drops cross-entity leak tools and confines person-addressed tools when scoped', async () => {
     process.env.PERSONIO_PROFILE = 'hr';
-    process.env.PERSONIO_HR_LEGAL_ENTITY = '816055'; // Spitze
-    const client = scopedClient({ p1: '816055', p2: '816056' }); // p1 Spitze, p2 Borgels
+    process.env.PERSONIO_HR_LEGAL_ENTITY = '816055'; // entity A
+    const client = scopedClient({ p1: '816055', p2: '816056' }); // p1 entity A, p2 entity B
 
     const server = createServer({ client });
     const [ct, st] = InMemoryTransport.createLinkedPair();
@@ -241,15 +241,15 @@ describe('legal-entity HR scoping', () => {
     expect(tools).not.toContain('personio_list_recruiting');
     expect(tools).toContain('personio_get_person');
 
-    // p1 (Spitze) allowed
+    // p1 (entity A) allowed
     const ok = await mcp.callTool({ name: 'personio_get_person', arguments: { personId: 'p1' } });
     expect(ok.isError).toBeFalsy();
-    // p2 (Borgels) rejected
+    // p2 (entity B) rejected
     const bad = await mcp.callTool({ name: 'personio_get_person', arguments: { personId: 'p2' } });
     expect(bad.isError).toBe(true);
     expect((bad.content as Array<{ text: string }>)[0]?.text).toContain('legal entity');
 
-    // list_absences without personId filters to Spitze persons only (p1)
+    // list_absences without personId filters to entity A persons only (p1)
     const abs = await mcp.callTool({ name: 'personio_list_absences', arguments: {} });
     const absData = JSON.parse((abs.content as Array<{ text: string }>)[0]?.text ?? '{}');
     expect(absData._data.map((r: { id: string }) => r.id)).toEqual(['a1']);
@@ -296,7 +296,7 @@ describe('expanded HR write tools', () => {
 
     await mcp.callTool({ name: 'personio_create_person', arguments: { firstName: 'A', lastName: 'B', email: 'ab@example.com', legalEntityId: '999999', employmentStartDate: '2026-09-01' } });
     const post = record.find(r => r.method === 'POST' && r.url.endsWith('/v2/persons'));
-    expect(post?.body).toContain('816055'); // forced to Spitze, not the 999999 the caller passed
+    expect(post?.body).toContain('816055'); // forced to entity A, not the 999999 the caller passed
     expect(post?.body).not.toContain('999999');
   });
 
