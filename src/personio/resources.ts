@@ -377,8 +377,44 @@ export interface ListDocumentsInput extends CursorInput {
 const DOWNLOAD_CAP_DEFAULT = 2 * 1024 * 1024;
 const DOWNLOAD_CAP_MAX = 20 * 1024 * 1024;
 
+interface DocumentsPage {
+  _data?: Array<{ id?: string | number; owner?: { id?: string | number } | null }>;
+  _meta?: { links?: { next?: { href?: string } | string } };
+}
+
+/**
+ * The download endpoint takes only a document id and runs on the company
+ * credential, so ownership must be proven before downloading: the document
+ * has to appear in the owner-filtered list. Fails closed.
+ */
+async function assertDocumentOwnedBy(client: PersonioClient, documentId: string, ownerId: string): Promise<void> {
+  let cursor: string | undefined;
+  for (let pageNo = 0; pageNo < 50; pageNo += 1) {
+    const resp = await client.get<DocumentsPage>('/v2/document-management/documents', {
+      limit: 200,
+      cursor,
+      owner_id: ownerId,
+    });
+    const match = (resp._data ?? []).some(
+      doc =>
+        doc.id !== undefined &&
+        String(doc.id) === documentId &&
+        (doc.owner?.id === undefined || String(doc.owner.id) === ownerId),
+    );
+    if (match) return;
+    const next = resp._meta?.links?.next;
+    const href = typeof next === 'string' ? next : next?.href;
+    if (!href) break;
+    cursor = new URL(href).searchParams.get('cursor') ?? undefined;
+    if (!cursor) break;
+  }
+  throw new Error(`Document ${documentId} was not found for owner ${ownerId}.`);
+}
+
 export async function listDocuments(client: PersonioClient, input: ListDocumentsInput): Promise<unknown> {
   if (input.documentId && input.download) {
+    if (!input.ownerId) throw new Error('ownerId is required to download a document.');
+    await assertDocumentOwnedBy(client, input.documentId, input.ownerId);
     const maxBytes = Math.min(input.maxBytes ?? DOWNLOAD_CAP_DEFAULT, DOWNLOAD_CAP_MAX);
     const { bytes, contentType } = await client.getBinary(
       `/v2/document-management/documents/${encodeURIComponent(input.documentId)}/download`,
