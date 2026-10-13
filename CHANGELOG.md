@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Security hardening.
+
+- HR legal-entity scope is now enforced on id-addressed tools (absence and
+  attendance update/delete, absence balances by email, document upload and
+  update/delete, project membership). The owning person is resolved first
+  and the call fails closed when it cannot be determined.
+  `personio_manage_document` takes `ownerId`, required on scoped instances.
+- Email-to-person lookups require exactly one case-insensitive match.
+- Document ownership proof requires a matching `owner.id` on the row.
+- Path parameters reject empty values, dot segments and separators.
+- HTTP: constant-time token comparison; refuse to start with
+  `PERSONIO_TRUST_FORWARDED_USER=true` and no `MCP_HTTP_TOKEN`.
+
 ## 0.1.0
 
 Initial release.

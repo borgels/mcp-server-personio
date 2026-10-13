@@ -12,6 +12,9 @@ import { resolvePerson, type ResolvedPerson } from '../personio/identity.js';
 import { checkToolPolicy, profile, toolNamesForProfile } from '../personio/policy.js';
 import { hrLegalEntity, LegalEntityScope } from '../personio/scope.js';
 import {
+  absencePeriodOwner,
+  assertDocumentOwnedBy,
+  attendancePeriodOwner,
   createAbsence,
   createAttendance,
   createCompensation,
@@ -38,6 +41,7 @@ import {
   updateEmployment,
   updatePerson,
   uploadDocument,
+  v1EmployeeEmail,
 } from '../personio/resources.js';
 
 export interface RegisterOptions {
@@ -72,6 +76,22 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
   // API has no legal-entity filter on most endpoints.
   const entityId = profile() === 'hr' ? hrLegalEntity() : undefined;
   const scope = entityId ? new LegalEntityScope(client, entityId) : undefined;
+  /** Resolve an email to a v2 person (exact, unique match) and assert it is in scope. */
+  const assertEmailInScope = async (email: string, what: string): Promise<void> => {
+    if (!scope) return;
+    const person = await resolvePerson(client, email);
+    await scope.assert(person.personId, what);
+  };
+  /** Map a v1 numeric employee id to its v2 person via email and assert it is in scope. */
+  const assertV1EmployeeInScope = async (employeeId: number, what: string): Promise<void> => {
+    if (!scope) return;
+    const email = await v1EmployeeEmail(client, employeeId);
+    const person = await resolvePerson(client, email);
+    if (person.legacyEmployeeId !== undefined && person.legacyEmployeeId !== employeeId) {
+      throw new Error(`${what}: employee ${employeeId} could not be mapped unambiguously to a Personio person.`);
+    }
+    await scope.assert(person.personId, what);
+  };
   const rows = (data: unknown): Array<Record<string, unknown>> =>
     Array.isArray((data as { _data?: unknown })?._data) ? ((data as { _data: Array<Record<string, unknown>> })._data) : [];
 
@@ -426,6 +446,7 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
     async input =>
       run('personio_list_absences', options, input, async () => {
         if (input.balanceForEmail) {
+          await assertEmailInScope(input.balanceForEmail, 'personio_list_absences');
           return jsonResult(await getAbsenceBalance(client, input.balanceForEmail));
         }
         if (scope && input.personId) await scope.assert(input.personId, 'personio_list_absences');
@@ -466,11 +487,18 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
           if (!input.absencePeriodId) {
             throw new Error('absencePeriodId is required for delete.');
           }
+          if (scope) await scope.assert(await absencePeriodOwner(client, input.absencePeriodId), 'personio_manage_absence');
           return jsonResult(await deleteAbsence(client, { absencePeriodId: input.absencePeriodId }));
         }
         if (input.action === 'update') {
           if (!input.absencePeriodId) {
             throw new Error('absencePeriodId is required for update.');
+          }
+          if (scope) {
+            await scope.assert(await absencePeriodOwner(client, input.absencePeriodId), 'personio_manage_absence');
+            if (input.patch && 'person' in input.patch) {
+              throw new Error('Reassigning an absence period to another person is not allowed on a legal-entity-scoped instance.');
+            }
           }
           return jsonResult(await updateAbsence(client, { absencePeriodId: input.absencePeriodId, patch: input.patch ?? {} }));
         }
@@ -543,11 +571,18 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
           if (!input.attendancePeriodId) {
             throw new Error('attendancePeriodId is required for delete.');
           }
+          if (scope) await scope.assert(await attendancePeriodOwner(client, input.attendancePeriodId), 'personio_manage_attendance');
           return jsonResult(await deleteAttendance(client, { attendancePeriodId: input.attendancePeriodId }));
         }
         if (input.action === 'update') {
           if (!input.attendancePeriodId) {
             throw new Error('attendancePeriodId is required for update.');
+          }
+          if (scope) {
+            await scope.assert(await attendancePeriodOwner(client, input.attendancePeriodId), 'personio_manage_attendance');
+            if (input.patch && 'person' in input.patch) {
+              throw new Error('Reassigning an attendance period to another person is not allowed on a legal-entity-scoped instance.');
+            }
           }
           return jsonResult(await updateAttendance(client, { attendancePeriodId: input.attendancePeriodId, patch: input.patch ?? {} }));
         }
@@ -582,7 +617,13 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_manage_project', options, input, async () => jsonResult(await manageProject(client, input))),
+      run('personio_manage_project', options, input, async () => {
+        if (scope && (input.action === 'add-member' || input.action === 'remove-member')) {
+          if (!input.personId) throw new Error(`personId is required for ${input.action}.`);
+          await scope.assert(input.personId, 'personio_manage_project');
+        }
+        return jsonResult(await manageProject(client, input));
+      }),
   );
 
   register(
@@ -675,7 +716,10 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_upload_document', options, input, async () => jsonResult(await uploadDocument(client, input))),
+      run('personio_upload_document', options, input, async () => {
+        await assertV1EmployeeInScope(input.employeeId, 'personio_upload_document');
+        return jsonResult(await uploadDocument(client, input));
+      }),
   );
 
   register(
@@ -687,14 +731,30 @@ export function registerPersonioTools(server: McpServer, client: PersonioClient,
       inputSchema: {
         action: z.enum(['update', 'delete']),
         documentId: z.string().trim().min(1),
+        ownerId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe('Person id that owns the document. Required on a legal-entity-scoped instance; when given, ownership is verified first.'),
         patch: z.record(z.string(), z.unknown()).optional().describe('Metadata to change for update.'),
       },
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async input =>
-      run('personio_manage_document', options, input, async () =>
-        jsonResult(await manageDocument(client, input)),
-      ),
+      run('personio_manage_document', options, input, async () => {
+        if (scope && !input.ownerId) {
+          throw new Error('ownerId is required on a legal-entity-scoped instance so the document owner can be verified.');
+        }
+        if (input.ownerId) {
+          if (scope) await scope.assert(input.ownerId, 'personio_manage_document');
+          await assertDocumentOwnedBy(client, input.documentId, input.ownerId);
+          if (scope && input.patch && 'owner' in input.patch) {
+            throw new Error('Moving a document to another owner is not allowed on a legal-entity-scoped instance.');
+          }
+        }
+        return jsonResult(await manageDocument(client, { action: input.action, documentId: input.documentId, patch: input.patch }));
+      }),
   );
 
   register(

@@ -1,4 +1,5 @@
 import type { PersonioClient } from './client.js';
+import { pathParam } from './path.js';
 
 /**
  * Legal-entity scoping for the HR profile. When PERSONIO_HR_LEGAL_ENTITY is
@@ -44,7 +45,7 @@ export class LegalEntityScope {
       for (const person of rows) {
         if (!person.id) continue;
         const emps = await this.client.get<EmploymentsResp>(
-          `/v2/persons/${encodeURIComponent(person.id)}/employments`,
+          `/v2/persons/${pathParam(person.id, 'personId')}/employments`,
         );
         const inEntity = (emps._data ?? []).some(e => e.legal_entity?.id === this.entityId);
         if (inEntity) allow.add(person.id);

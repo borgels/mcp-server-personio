@@ -1,4 +1,5 @@
 import type { PersonioClient, QueryValue } from './client.js';
+import { pathParam } from './path.js';
 import { assertWritesEnabled } from './policy.js';
 
 /**
@@ -43,11 +44,11 @@ export async function getPerson(
   client: PersonioClient,
   input: { personId: string; includeEmployments?: boolean },
 ): Promise<unknown> {
-  const person = await client.get(`/v2/persons/${encodeURIComponent(input.personId)}`);
+  const person = await client.get(`/v2/persons/${pathParam(input.personId, 'personId')}`);
   if (!input.includeEmployments) {
     return person;
   }
-  const employments = await client.get(`/v2/persons/${encodeURIComponent(input.personId)}/employments`);
+  const employments = await client.get(`/v2/persons/${pathParam(input.personId, 'personId')}/employments`);
   return { person, employments };
 }
 
@@ -56,7 +57,7 @@ export async function updatePerson(
   input: { personId: string; patch: Record<string, unknown> },
 ): Promise<unknown> {
   assertWritesEnabled('personio_update_person');
-  return client.patch(`/v2/persons/${encodeURIComponent(input.personId)}`, input.patch);
+  return client.patch(`/v2/persons/${pathParam(input.personId, 'personId')}`, input.patch);
 }
 
 export interface CreatePersonInput {
@@ -130,7 +131,7 @@ export async function createPerson(client: PersonioClient, input: CreatePersonIn
 /** Resolve a person's (first) employment id. */
 async function firstEmploymentId(client: PersonioClient, personId: string): Promise<string> {
   const emps = await client.get<{ _data?: Array<{ id?: string }> }>(
-    `/v2/persons/${encodeURIComponent(personId)}/employments`,
+    `/v2/persons/${pathParam(personId, 'personId')}/employments`,
   );
   const id = emps._data?.[0]?.id;
   if (!id) {
@@ -152,7 +153,7 @@ export async function updateEmployment(client: PersonioClient, input: UpdateEmpl
   assertWritesEnabled('personio_update_employment');
   const employmentId = input.employmentId ?? (await firstEmploymentId(client, input.personId));
   return client.patch(
-    `/v2/persons/${encodeURIComponent(input.personId)}/employments/${encodeURIComponent(employmentId)}`,
+    `/v2/persons/${pathParam(input.personId, 'personId')}/employments/${pathParam(employmentId, 'employmentId')}`,
     input.patch,
   );
 }
@@ -234,31 +235,82 @@ export async function createAbsence(client: PersonioClient, input: CreateAbsence
 }
 
 export async function deleteAbsence(client: PersonioClient, input: { absencePeriodId: string }): Promise<unknown> {
-  return client.delete(`/v2/absence-periods/${encodeURIComponent(input.absencePeriodId)}`);
+  return client.delete(`/v2/absence-periods/${pathParam(input.absencePeriodId, 'absencePeriodId')}`);
 }
 
 export async function updateAbsence(
   client: PersonioClient,
   input: { absencePeriodId: string; patch: Record<string, unknown> },
 ): Promise<unknown> {
-  return client.patch(`/v2/absence-periods/${encodeURIComponent(input.absencePeriodId)}`, input.patch);
+  return client.patch(`/v2/absence-periods/${pathParam(input.absencePeriodId, 'absencePeriodId')}`, input.patch);
 }
 
 export async function listAbsenceTypes(client: PersonioClient, input: CursorInput = {}): Promise<unknown> {
   return client.get('/v2/absence-types', page(input, 100));
 }
 
+interface V1EmployeeRow {
+  attributes?: { id?: { value?: number | string }; email?: { value?: string } };
+}
+
+/**
+ * Resolve a v1 numeric employee id from an email. Requires exactly one row
+ * whose email matches case-insensitively; anything else fails closed.
+ */
+export async function v1EmployeeIdForEmail(client: PersonioClient, email: string): Promise<number> {
+  const lookup = await client.get<{ data?: V1EmployeeRow[] }>('/company/employees', { email });
+  const rows = lookup.data ?? [];
+  const wanted = email.trim().toLowerCase();
+  const matches = rows.filter(r => r.attributes?.email?.value?.trim().toLowerCase() === wanted);
+  if (matches.length !== 1 || rows.length !== 1) {
+    throw new Error(
+      matches.length === 0
+        ? `No v1 employee found for ${email}.`
+        : `More than one v1 employee matched ${email}; refusing to guess which one is meant.`,
+    );
+  }
+  const employeeId = Number(matches[0]?.attributes?.id?.value);
+  if (!Number.isInteger(employeeId) || employeeId <= 0) {
+    throw new Error(`No v1 employee id returned for ${email}.`);
+  }
+  return employeeId;
+}
+
+/** Look up the email of a v1 numeric employee id (fails closed when it is not returned). */
+export async function v1EmployeeEmail(client: PersonioClient, employeeId: number): Promise<string> {
+  const resp = await client.get<{ data?: V1EmployeeRow }>(`/company/employees/${pathParam(employeeId, 'employeeId')}`);
+  const email = resp.data?.attributes?.email?.value?.trim();
+  if (!email) {
+    throw new Error(`Could not determine the email of employee ${employeeId}; it may not exist or email is not whitelisted.`);
+  }
+  return email;
+}
+
 /** Absence balances exist only in v1 — resolve the numeric employee id by email. */
 export async function getAbsenceBalance(client: PersonioClient, email: string): Promise<unknown> {
-  const lookup = await client.get<{ data?: Array<{ attributes?: { id?: { value?: number } } }> }>(
-    '/company/employees',
-    { email },
-  );
-  const employeeId = lookup.data?.[0]?.attributes?.id?.value;
-  if (!employeeId) {
-    throw new Error(`No v1 employee found for ${email} — cannot fetch absence balance.`);
-  }
-  return client.get(`/company/employees/${employeeId}/absences/balance`);
+  const employeeId = await v1EmployeeIdForEmail(client, email).catch((error: unknown) => {
+    throw new Error(`Cannot fetch absence balance: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  return client.get(`/company/employees/${pathParam(employeeId, 'employeeId')}/absences/balance`);
+}
+
+interface PeriodResp {
+  _data?: { person?: { id?: string | number } | null } | Array<{ person?: { id?: string | number } | null }>;
+  person?: { id?: string | number } | null;
+}
+
+function periodOwner(resp: PeriodResp): string | undefined {
+  const data = Array.isArray(resp._data) ? (resp._data.length === 1 ? resp._data[0] : undefined) : resp._data;
+  const id = data?.person?.id ?? resp.person?.id;
+  return id === undefined || id === null || String(id) === '' ? undefined : String(id);
+}
+
+/** The person id that owns an absence period. Throws when it cannot be determined. */
+export async function absencePeriodOwner(client: PersonioClient, absencePeriodId: string): Promise<string> {
+  const resp = await client.get<PeriodResp>(`/v2/absence-periods/${pathParam(absencePeriodId, 'absencePeriodId')}`);
+  const owner = periodOwner(resp);
+  if (!owner) throw new Error(`Could not determine who owns absence period ${absencePeriodId}.`);
+  return owner;
 }
 
 // --- Attendances (v2: WORK and BREAK are separate periods) ---
@@ -302,18 +354,28 @@ export async function createAttendance(client: PersonioClient, input: CreateAtte
   });
 }
 
+/** The person id that owns an attendance period. Throws when it cannot be determined. */
+export async function attendancePeriodOwner(client: PersonioClient, attendancePeriodId: string): Promise<string> {
+  const resp = await client.get<PeriodResp>(
+    `/v2/attendance-periods/${pathParam(attendancePeriodId, 'attendancePeriodId')}`,
+  );
+  const owner = periodOwner(resp);
+  if (!owner) throw new Error(`Could not determine who owns attendance period ${attendancePeriodId}.`);
+  return owner;
+}
+
 export async function deleteAttendance(
   client: PersonioClient,
   input: { attendancePeriodId: string },
 ): Promise<unknown> {
-  return client.delete(`/v2/attendance-periods/${encodeURIComponent(input.attendancePeriodId)}`);
+  return client.delete(`/v2/attendance-periods/${pathParam(input.attendancePeriodId, 'attendancePeriodId')}`);
 }
 
 export async function updateAttendance(
   client: PersonioClient,
   input: { attendancePeriodId: string; patch: Record<string, unknown> },
 ): Promise<unknown> {
-  return client.patch(`/v2/attendance-periods/${encodeURIComponent(input.attendancePeriodId)}`, input.patch);
+  return client.patch(`/v2/attendance-periods/${pathParam(input.attendancePeriodId, 'attendancePeriodId')}`, input.patch);
 }
 
 // --- Projects ---
@@ -331,7 +393,7 @@ export interface ManageProjectInput {
 
 export async function manageProject(client: PersonioClient, input: ManageProjectInput): Promise<unknown> {
   assertWritesEnabled('personio_manage_project');
-  const id = input.projectId ? encodeURIComponent(input.projectId) : undefined;
+  const id = input.projectId ? pathParam(input.projectId, 'projectId') : undefined;
   switch (input.action) {
     case 'create':
       return client.post('/v2/projects', input.payload ?? {});
@@ -385,9 +447,11 @@ interface DocumentsPage {
 /**
  * The download endpoint takes only a document id and runs on the company
  * credential, so ownership must be proven before downloading: the document
- * has to appear in the owner-filtered list. Fails closed.
+ * has to appear in the owner-filtered list AND carry a matching owner.id
+ * (v2 document rows include owner: {id}); a row without an owner is not
+ * accepted as proof. Fails closed.
  */
-async function assertDocumentOwnedBy(client: PersonioClient, documentId: string, ownerId: string): Promise<void> {
+export async function assertDocumentOwnedBy(client: PersonioClient, documentId: string, ownerId: string): Promise<void> {
   let cursor: string | undefined;
   for (let pageNo = 0; pageNo < 50; pageNo += 1) {
     const resp = await client.get<DocumentsPage>('/v2/document-management/documents', {
@@ -399,7 +463,9 @@ async function assertDocumentOwnedBy(client: PersonioClient, documentId: string,
       doc =>
         doc.id !== undefined &&
         String(doc.id) === documentId &&
-        (doc.owner?.id === undefined || String(doc.owner.id) === ownerId),
+        doc.owner?.id !== undefined &&
+        doc.owner?.id !== null &&
+        String(doc.owner.id) === ownerId,
     );
     if (match) return;
     const next = resp._meta?.links?.next;
@@ -417,7 +483,7 @@ export async function listDocuments(client: PersonioClient, input: ListDocuments
     await assertDocumentOwnedBy(client, input.documentId, input.ownerId);
     const maxBytes = Math.min(input.maxBytes ?? DOWNLOAD_CAP_DEFAULT, DOWNLOAD_CAP_MAX);
     const { bytes, contentType } = await client.getBinary(
-      `/v2/document-management/documents/${encodeURIComponent(input.documentId)}/download`,
+      `/v2/document-management/documents/${pathParam(input.documentId, 'documentId')}/download`,
       maxBytes,
     );
     const isText = /^(text\/|application\/(json|xml|csv))/.test(contentType);
@@ -472,7 +538,7 @@ export async function manageDocument(
   input: { action: 'update' | 'delete'; documentId: string; patch?: Record<string, unknown> },
 ): Promise<unknown> {
   assertWritesEnabled('personio_manage_document');
-  const path = `/v2/document-management/documents/${encodeURIComponent(input.documentId)}`;
+  const path = `/v2/document-management/documents/${pathParam(input.documentId, 'documentId')}`;
   if (input.action === 'delete') {
     return client.delete(path);
   }
@@ -550,7 +616,7 @@ export async function getReport(client: PersonioClient, input: GetReportInput = 
     return client.get('/v2/reports/attributes', page(input, 100));
   }
   if (input.reportId) {
-    return client.get(`/v2/reports/${encodeURIComponent(input.reportId)}`, {
+    return client.get(`/v2/reports/${pathParam(input.reportId, 'reportId')}`, {
       limit: input.limit,
       cursor: input.cursor,
       locale: input.locale,
@@ -571,7 +637,7 @@ export interface ListRecruitingInput extends CursorInput {
 export async function listRecruiting(client: PersonioClient, input: ListRecruitingInput): Promise<unknown> {
   const base = `/v2/recruiting/${input.kind}`;
   if (input.id) {
-    return client.get(`${base}/${encodeURIComponent(input.id)}`, undefined, { beta: true });
+    return client.get(`${base}/${pathParam(input.id, 'id')}`, undefined, { beta: true });
   }
   return client.get(
     base,
