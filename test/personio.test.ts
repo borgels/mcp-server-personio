@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PersonioClient } from '../src/personio/client.js';
 import { createServer } from '../src/server.js';
 import { checkToolPolicy } from '../src/personio/policy.js';
-import { createAbsence, createAttendance, listCompensations } from '../src/personio/resources.js';
+import { createAbsence, createAttendance, listCompensations, listDocuments } from '../src/personio/resources.js';
 import { resolvePerson } from '../src/personio/identity.js';
 
 const originalEnv = { ...process.env };
@@ -376,5 +376,30 @@ describe('the employment shapes the API actually defines', () => {
     });
     const post = record.find(r => r.method === 'POST' && r.url.endsWith('/v2/persons'));
     expect(JSON.parse(post?.body ?? '{}').employments[0].position).toEqual({ title: 'Senior People & Culture Consultant' });
+  });
+});
+
+describe('document download ownership', () => {
+  const responder = (url: string) => {
+    if (url.includes('/download')) return { secret: 'content' };
+    const owner = new URL(url).searchParams.get('owner_id');
+    return { _data: owner === 'A' ? [{ id: '111', owner: { id: 'A' } }] : [{ id: '222', owner: { id: 'B' } }] };
+  };
+
+  it("downloads a document that belongs to the owner", async () => {
+    const record: Recorded[] = [];
+    const client = makeClient(record, responder);
+    const result = await listDocuments(client, { ownerId: 'A', documentId: '111', download: true });
+    expect(result).toMatchObject({ content: JSON.stringify({ secret: 'content' }) });
+    expect(record.at(-1)?.url).toContain('/v2/document-management/documents/111/download');
+  });
+
+  it("refuses another person's document id and never requests the download", async () => {
+    const record: Recorded[] = [];
+    const client = makeClient(record, responder);
+    await expect(listDocuments(client, { ownerId: 'A', documentId: '222', download: true })).rejects.toThrow(
+      /not found for owner A/,
+    );
+    expect(record.some(r => r.url.includes('/download'))).toBe(false);
   });
 });
