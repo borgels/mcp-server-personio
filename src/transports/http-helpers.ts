@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export class HttpRequestError extends Error {
@@ -31,8 +32,31 @@ export function assertAuthorized(req: IncomingMessage, config = getHttpConfig())
     return;
   }
 
-  if (req.headers.authorization !== `Bearer ${config.httpToken}`) {
+  if (!tokenMatches(req.headers.authorization, `Bearer ${config.httpToken}`)) {
     throw new HttpRequestError(401, 'Unauthorized');
+  }
+}
+
+/** Constant-time comparison (hash both sides so lengths never leak or throw). */
+export function tokenMatches(presented: string | undefined, expected: string): boolean {
+  if (typeof presented !== 'string') return false;
+  const a = createHash('sha256').update(presented, 'utf8').digest();
+  const b = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Refuse to run the HTTP transport when forwarded identity headers are trusted
+ * but no bearer token protects the endpoint: anyone who can reach the port
+ * could then claim any user identity.
+ */
+export function assertSafeHttpStartup(env: NodeJS.ProcessEnv = process.env): void {
+  const trusted = env.PERSONIO_TRUST_FORWARDED_USER === 'true';
+  if (trusted && !env.MCP_HTTP_TOKEN) {
+    throw new Error(
+      'PERSONIO_TRUST_FORWARDED_USER=true requires MCP_HTTP_TOKEN to be set. ' +
+        'Refusing to start: without a token any caller could assert an arbitrary X-MCP-User identity.',
+    );
   }
 }
 

@@ -13,6 +13,10 @@ One image, selected by `PERSONIO_PROFILE`:
 
 - **`skip_approval` is never sent** — absence/attendance writes always enter Personio's normal approval workflow (the v2 default; v1's silent-bypass default is one reason this server is v2-first).
 - No delete-person tool. Employee-profile tools never accept foreign person ids.
+- **Legal-entity scope** (`PERSONIO_HR_LEGAL_ENTITY=<id>`, HR profile): every person-addressed tool is confined to employees of that entity. Tools addressed by another id resolve the owning person first and fail closed when it cannot be determined: absence/attendance periods are fetched to read their person, `balanceForEmail` is resolved to a person, `personio_upload_document`'s v1 `employeeId` is mapped to a person via its email, project membership changes check `personId`, and `personio_manage_document` requires `ownerId` (verified against the owner-filtered document list) on a scoped instance.
+- Email lookups require exactly one person whose email matches case-insensitively; ambiguous or non-matching results fail closed.
+- Caller-supplied ids used in URL paths are rejected if empty, `.`/`..`, or contain `/`, `\`, `?`, `#` or their percent-encoded forms.
+- HTTP transport: `MCP_HTTP_TOKEN` is compared in constant time. With `PERSONIO_TRUST_FORWARDED_USER=true` the HTTP server **refuses to start unless `MCP_HTTP_TOKEN` is set**, since the forwarded `X-MCP-User` header would otherwise be accepted from any caller.
 - Only credential-whitelisted attributes are returned by Personio — `personio_list_attributes` shows what your credential can see (missing attributes are omitted silently, not errored).
 
 ## Not possible via Personio's public API

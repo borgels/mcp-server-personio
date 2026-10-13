@@ -155,7 +155,7 @@ describe('profiles and policy', () => {
 describe('identity scoping', () => {
   it('resolves email to person id and fails closed for unknown emails', async () => {
     const record: Recorded[] = [];
-    const found = makeClient(record, () => ({ _data: [{ id: 'p42', first_name: 'Test', last_name: 'Person' }] }));
+    const found = makeClient(record, () => ({ _data: [{ id: 'p42', email: 'Test@Example.com', first_name: 'Test', last_name: 'Person' }] }));
     const person = await resolvePerson(found, 'test@example.com');
     expect(person.personId).toBe('p42');
     expect(record[0]?.url).toContain('email=test%40example.com');
@@ -169,7 +169,7 @@ describe('identity scoping', () => {
     const record: Recorded[] = [];
     const client = makeClient(record, url =>
       url.includes('/v2/persons?')
-        ? { _data: [{ id: 'p42', first_name: 'Me', last_name: 'Self' }] }
+        ? { _data: [{ id: 'p42', email: 'me@example.com', first_name: 'Me', last_name: 'Self' }] }
         : { _data: [] },
     );
     const server = createServer({ client, onBehalfOf: 'me@example.com' });
