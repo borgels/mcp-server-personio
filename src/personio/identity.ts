@@ -19,14 +19,22 @@ interface PersonsResponse {
  * person server-side. Unknown emails fail closed with a clear message.
  */
 export async function resolvePerson(client: PersonioClient, email: string): Promise<ResolvedPerson> {
-  const response = await client.get<PersonsResponse>('/v2/persons', { email, limit: 1 });
+  // Ask for two rows so an ambiguous lookup is detectable, and only accept a
+  // row whose email actually matches (case-insensitively) — never "the first
+  // row the filter returned".
+  const response = await client.get<PersonsResponse>('/v2/persons', { email, limit: 2 });
   const rows = response._data ?? response.data ?? [];
-  const person = rows[0];
-  if (!person) {
+  const wanted = email.trim().toLowerCase();
+  const matches = rows.filter(row => emailOf(row) === wanted);
+  if (matches.length === 0) {
     throw new Error(
       `No Personio person found for ${email}. The employee must exist in Personio (with this email) before self-service tools work.`,
     );
   }
+  if (matches.length > 1 || rows.length > 1) {
+    throw new Error(`Personio returned more than one person for ${email}; refusing to guess which one is meant.`);
+  }
+  const person = matches[0] as Record<string, unknown>;
 
   const personId = String(person.id ?? '');
   if (!personId) {
@@ -43,4 +51,11 @@ export async function resolvePerson(client: PersonioClient, email: string): Prom
     legacyEmployeeId: legacyRaw === undefined ? undefined : Number(legacyRaw),
     name: `${first} ${last}`.trim() || undefined,
   };
+}
+
+function emailOf(row: Record<string, unknown>): string | undefined {
+  const raw = row.email;
+  const value =
+    typeof raw === 'string' ? raw : typeof (raw as { value?: unknown })?.value === 'string' ? (raw as { value: string }).value : undefined;
+  return value?.trim().toLowerCase();
 }
