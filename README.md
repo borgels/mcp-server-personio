@@ -30,6 +30,14 @@ Performance, surveys, whistleblowing, onboarding checklists, workflow automation
 
 One client_id/client_secret pair (Settings → Integrations → API credentials) drives both API generations: OAuth2 client-credentials against `/v2/auth/token` (form-encoded) for v2, and the stable 24h `papi-` token from `/v1/auth` for the two v1-only flows (absence balances, document upload).
 
+## Install
+
+```bash
+npx mcp-server-personio
+```
+
+Runs the stdio server from npm. Configure it with the environment variables in `.env.example`. Over stdio the `employee` profile acts as `PERSONIO_DEFAULT_USER` (your Personio email); without it, its self-service tools refuse.
+
 ## Run
 
 ```bash
