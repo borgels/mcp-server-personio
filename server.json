@@ -32,12 +32,17 @@
         },
         {
           "name": "PERSONIO_PROFILE",
-          "description": "Tool profile.",
+          "description": "Tool profile: employee (self-service, needs PERSONIO_DEFAULT_USER) or hr (company-wide).",
           "default": "employee",
           "choices": [
             "employee",
             "hr"
           ]
+        },
+        {
+          "name": "PERSONIO_DEFAULT_USER",
+          "description": "Required for the employee profile (the default): your Personio email, which the self-service tools act as.",
+          "placeholder": "you@example.com"
         },
         {
           "name": "PERSONIO_HR_LEGAL_ENTITY",

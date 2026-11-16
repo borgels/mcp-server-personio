@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Published to npm and the MCP Registry from tagged releases.
+- stdio: `PERSONIO_DEFAULT_USER` sets the employee the `employee` profile acts as.
 
 ## 0.2.0
 

@@ -36,7 +36,7 @@ One client_id/client_secret pair (Settings → Integrations → API credentials)
 npx mcp-server-personio
 ```
 
-Runs the stdio server from npm. Configure it with the environment variables in `.env.example`.
+Runs the stdio server from npm. Configure it with the environment variables in `.env.example`. Over stdio the `employee` profile acts as `PERSONIO_DEFAULT_USER` (your Personio email); without it, its self-service tools refuse.
 
 ## Run
 
