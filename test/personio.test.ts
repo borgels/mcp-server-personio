@@ -403,3 +403,48 @@ describe('document download ownership', () => {
     expect(record.some(r => r.url.includes('/download'))).toBe(false);
   });
 });
+
+describe('PersonioClient redirects, error bodies and configuration', () => {
+  it('never follows redirects (the token request carries the client secret)', async () => {
+    const inits: RequestInit[] = [];
+    const fetchImpl = (async (_url: string | URL, init: RequestInit = {}) => {
+      inits.push(init);
+      return new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/token' } });
+    }) as unknown as typeof fetch;
+    const client = new PersonioClient({ clientId: 'id', clientSecret: 'secret', fetchImpl });
+    await expect(client.get('/v2/persons')).rejects.toThrow(/307.*Redirect not followed|Redirect not followed.*307/s);
+    expect(inits.length).toBeGreaterThan(0);
+    expect(inits.every(init => init.redirect === 'manual')).toBe(true);
+  });
+
+  it('caps error bodies', async () => {
+    const fetchImpl = (async () =>
+      new Response('x'.repeat(200_000), { status: 500, headers: { 'content-type': 'text/plain' } })) as unknown as typeof fetch;
+    const client = new PersonioClient({ clientId: 'id', clientSecret: 'secret', fetchImpl });
+    const error = (await client.get('/v2/persons').catch((e: unknown) => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message.length).toBeLessThan(70_000);
+  });
+
+  it('enforces the binary download cap while streaming', async () => {
+    const fetchImpl = (async (url: string | URL) =>
+      String(url).includes('/v2/auth/token')
+        ? new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), {
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(new Uint8Array(5000))) as unknown as typeof fetch;
+    const client = new PersonioClient({ clientId: 'id', clientSecret: 'secret', fetchImpl });
+    await expect(client.getBinary('/v2/document-management/documents/1/download', 1000)).rejects.toThrow(/1000 byte limit/);
+  });
+
+  it('rejects an invalid PERSONIO_TIMEOUT_MS instead of using NaN', () => {
+    const saved = process.env.PERSONIO_TIMEOUT_MS;
+    process.env.PERSONIO_TIMEOUT_MS = 'abc';
+    try {
+      expect(() => new PersonioClient({})).toThrow(/PERSONIO_TIMEOUT_MS/);
+    } finally {
+      if (saved === undefined) delete process.env.PERSONIO_TIMEOUT_MS;
+      else process.env.PERSONIO_TIMEOUT_MS = saved;
+    }
+  });
+});

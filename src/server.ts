@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { PersonioClient, type PersonioClientOptions } from './personio/client.js';
 import { registerPersonioTools } from './tools/personio.js';
+import { PACKAGE_VERSION } from './version.js';
 
 export interface CreateServerOptions {
   client?: PersonioClient;
@@ -12,7 +13,7 @@ export interface CreateServerOptions {
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer({
     name: 'personio',
-    version: '0.1.0',
+    version: PACKAGE_VERSION,
   });
 
   const client = options.client ?? new PersonioClient(options.clientOptions);

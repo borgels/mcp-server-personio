@@ -273,12 +273,12 @@ describe('path parameter guard', () => {
 
 describe('HTTP transport hardening', () => {
   const req = (authorization?: string) => ({ headers: { authorization } }) as unknown as IncomingMessage;
-  const config = { host: '127.0.0.1', port: 0, maxBodyBytes: 1, httpToken: 'sekret' };
+  const config = { host: '127.0.0.1', port: 0, maxBodyBytes: 1, httpToken: 'sekret'.padEnd(32, '0') };
 
   it('compares bearer tokens correctly', () => {
-    expect(() => assertAuthorized(req('Bearer sekret'), config)).not.toThrow();
-    expect(() => assertAuthorized(req('Bearer sekreT'), config)).toThrow('Unauthorized');
-    expect(() => assertAuthorized(req('Bearer sekret-longer'), config)).toThrow('Unauthorized');
+    expect(() => assertAuthorized(req(`Bearer ${config.httpToken}`), config)).not.toThrow();
+    expect(() => assertAuthorized(req(`Bearer ${config.httpToken.toUpperCase()}`), config)).toThrow('Unauthorized');
+    expect(() => assertAuthorized(req(`Bearer ${config.httpToken}-longer`), config)).toThrow('Unauthorized');
     expect(() => assertAuthorized(req(undefined), config)).toThrow('Unauthorized');
     expect(tokenMatches(undefined, 'x')).toBe(false);
   });
