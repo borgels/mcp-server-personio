@@ -1,3 +1,4 @@
+import { readEnvInteger } from '../config-env.js';
 import { PersonioHttpError } from '../errors.js';
 
 export interface PersonioClientOptions {
@@ -45,7 +46,8 @@ export class PersonioClient {
     this.baseUrl = trimTrailingSlash(options.baseUrl ?? process.env.PERSONIO_BASE_URL ?? 'https://api.personio.de');
     assertSafeBaseUrl(this.baseUrl);
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.PERSONIO_TIMEOUT_MS ?? 30_000);
+    this.timeoutMs =
+      options.timeoutMs ?? readEnvInteger('PERSONIO_TIMEOUT_MS', 30_000, { min: 1, max: 600_000 });
   }
 
   async get<T>(path: string, query?: Record<string, QueryValue>, options?: RequestOptions): Promise<T> {
@@ -68,7 +70,7 @@ export class PersonioClient {
   async getBinary(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; contentType: string }> {
     const token = await this.getV2Token();
     const url = this.buildUrl(path);
-    const response = await this.fetchImpl(url, {
+    const response = await this.send(url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(this.timeoutMs),
@@ -76,9 +78,15 @@ export class PersonioClient {
     if (!response.ok) {
       throw new PersonioHttpError({ status: response.status, url, payload: await readBody(response) });
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > maxBytes) {
-      throw new Error(`Document is ${bytes.byteLength} bytes which exceeds the ${maxBytes} byte limit.`);
+    const declared = Number(response.headers.get('content-length') ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`Document is ${declared} bytes which exceeds the ${maxBytes} byte limit.`);
+    }
+    // Enforce the cap while streaming, so an unannounced large body is never buffered whole.
+    const { bytes, exceeded } = await readUpTo(response, maxBytes);
+    if (exceeded) {
+      throw new Error(`Document exceeds the ${maxBytes} byte limit.`);
     }
     return { bytes, contentType: response.headers.get('content-type') ?? 'application/octet-stream' };
   }
@@ -104,7 +112,7 @@ export class PersonioClient {
       file.fileName,
     );
 
-    const response = await this.fetchImpl(url, {
+    const response = await this.send(url, {
       method: 'POST',
       headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
       body: form,
@@ -140,6 +148,25 @@ export class PersonioClient {
     return url.toString();
   }
 
+  /**
+   * Every request carries credentials (a bearer token, or the client secret
+   * in the body of the token requests), so redirects are never followed: a
+   * 307/308 would resend the secret to the redirect target.
+   */
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    const response = await this.fetchImpl(url, { ...init, redirect: 'manual' });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new PersonioHttpError({
+        status: response.status,
+        url,
+        payload: null,
+        fallbackMessage: 'Redirect not followed (check PERSONIO_BASE_URL).',
+      });
+    }
+    return response;
+  }
+
   private requireCredentials(): { clientId: string; clientSecret: string } {
     if (!this.clientId || !this.clientSecret) {
       throw new Error('Missing PERSONIO_CLIENT_ID / PERSONIO_CLIENT_SECRET. Set them in the MCP server environment.');
@@ -153,7 +180,7 @@ export class PersonioClient {
     }
     const { clientId, clientSecret } = this.requireCredentials();
     const url = `${this.baseUrl}/v2/auth/token`;
-    const response = await this.fetchImpl(url, {
+    const response = await this.send(url, {
       method: 'POST',
       // Personio's auth endpoints require form encoding, not JSON.
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -184,7 +211,7 @@ export class PersonioClient {
     }
     const { clientId, clientSecret } = this.requireCredentials();
     const url = `${this.baseUrl}/v1/auth`;
-    const response = await this.fetchImpl(url, {
+    const response = await this.send(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
@@ -230,7 +257,7 @@ export class PersonioClient {
       init.body = JSON.stringify(body);
     }
 
-    const response = await this.fetchImpl(url, init);
+    const response = await this.send(url, init);
 
     if (response.status === 401 && !isRetry) {
       if (isV1) {
@@ -276,8 +303,20 @@ function extractV1Error(value: unknown): string {
   return error?.message ?? 'Personio v1 request failed (success: false).';
 }
 
+/** Error bodies are read up to this many bytes; the rest is discarded. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
 async function readBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  let text: string;
+  if (response.ok) {
+    text = await response.text();
+  } else {
+    const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+    text = Buffer.from(bytes).toString('utf8');
+    if (exceeded) {
+      return `${text}... [truncated]`;
+    }
+  }
   if (!text) {
     return null;
   }
@@ -286,6 +325,33 @@ async function readBody(response: Response): Promise<unknown> {
   } catch {
     return text;
   }
+}
+
+/** Reads at most `limit` bytes of the body; cancels the rest and reports whether it was longer. */
+async function readUpTo(response: Response, limit: number): Promise<{ bytes: Uint8Array; exceeded: boolean }> {
+  if (!response.body) {
+    return { bytes: new Uint8Array(0), exceeded: false };
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let exceeded = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (total + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - total));
+      total = limit;
+      exceeded = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  return { bytes: new Uint8Array(Buffer.concat(chunks)), exceeded };
 }
 
 function trimTrailingSlash(value: string): string {

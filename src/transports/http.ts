@@ -1,96 +1,38 @@
-import { createServer as createNodeServer } from 'node:http';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createServer as createMcpServer } from '../server.js';
-import { trustForwardedUser } from '../personio/policy.js';
-import {
-  assertAllowedOrigin,
-  assertAuthorized,
-  assertSafeHttpStartup,
-  corsHeaders,
-  getHttpConfig,
-  HttpRequestError,
-  readJsonBody,
-  sendJson,
-} from './http-helpers.js';
+import { PersonioClient } from '../personio/client.js';
+import { assertSafeHttpStartup, configWarnings, getHttpConfig, type HttpConfig } from './http-helpers.js';
+import { startHttpServer } from './http-server.js';
 
-try {
-  assertSafeHttpStartup();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-}
-
-const config = getHttpConfig();
-
-const httpServer = createNodeServer(async (req, res) => {
+async function main(): Promise<void> {
+  let config: HttpConfig;
   try {
-    if (req.url !== '/mcp') {
-      sendJson(res, 404, { error: 'Not found' }, req);
-      return;
-    }
-
-    assertAllowedOrigin(req);
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, corsHeaders(req));
-      res.end();
-      return;
-    }
-
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'Method not allowed' }, req, { Allow: 'POST' });
-      return;
-    }
-
-    assertAuthorized(req, config);
-    const body = await readJsonBody(req, config.maxBodyBytes);
-
-    // The gateway forwards the Entra-verified user as X-MCP-User; the
-    // stateless per-request server binds it as the Personio on-behalf-of
-    // identity. Only honored when the deployment says the header can be
-    // trusted (it never arrives from public traffic — the gateway sets it).
-    const forwardedUser = trustForwardedUser()
-      ? (firstHeaderValue(req.headers['x-mcp-user']) ?? undefined)
-      : undefined;
-
-    const mcpServer = createMcpServer({ onBehalfOf: forwardedUser });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res, body);
-
-    res.on('close', () => {
-      void transport.close();
-      void mcpServer.close();
-    });
+    config = getHttpConfig();
+    assertSafeHttpStartup(process.env, config);
+    // Validate the Personio client configuration (base URL, timeout) once at
+    // startup instead of on the first request.
+    new PersonioClient();
   } catch (error) {
-    console.error(error);
-    if (!res.headersSent) {
-      if (error instanceof HttpRequestError) {
-        sendJson(res, error.status, { error: error.message }, req);
-        return;
-      }
-
-      sendJson(res, 500, {
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal server error',
-        },
-        id: null,
-      }, req);
-    }
+    console.error(
+      `Personio MCP HTTP server not started: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
   }
-});
 
-function firstHeaderValue(value: string | string[] | undefined): string | undefined {
-  const raw = Array.isArray(value) ? value[0] : value;
-  const trimmed = raw?.trim();
-  return trimmed ? trimmed : undefined;
+  for (const warning of configWarnings(config)) {
+    console.error(warning);
+  }
+
+  const running = await startHttpServer(config);
+  console.error(`Personio MCP HTTP server listening on http://${config.host}:${running.port}/mcp`);
+
+  const shutdown = (signal: string) => {
+    console.error(`Received ${signal}, shutting down`);
+    void running.close().then(() => process.exit(0));
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
-httpServer.listen(config.port, config.host, () => {
-  console.error(`Personio MCP HTTP server listening on http://${config.host}:${config.port}/mcp`);
+main().catch(error => {
+  console.error(error);
+  process.exit(1);
 });

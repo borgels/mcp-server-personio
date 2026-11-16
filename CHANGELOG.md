@@ -1,6 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+HTTP transport, upstream client and supply chain.
+
+- HTTP transport fails closed: it refuses to start on a non-loopback bind, or
+  with `MCP_ALLOW_ANY_ORIGIN=true`, unless `MCP_HTTP_TOKEN` is set.
+  `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` is an explicit escape hatch.
+- `MCP_HTTP_TOKEN` must be at least 32 printable ASCII characters without
+  whitespace.
+- Failed authentication is limited per client address (429 with
+  `Retry-After`; `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS`).
+  Requests with a valid token are never throttled.
+- `Host` header check on loopback binds (`MCP_ALLOWED_HOSTS` to override).
+- 401 responses carry `WWW-Authenticate: Bearer`; invalid JSON gets 400
+  instead of 500; oversized bodies get 413 before they are read.
+- `GET /healthz` (unauthenticated) and graceful shutdown on SIGTERM/SIGINT.
+- `PORT`, `MCP_MAX_BODY_BYTES` and boolean flags are validated at startup.
+- CI runs on pull requests and before every image publish; images are only
+  published from `main` and `v*` tags, with SBOM and provenance attestations.
+  GitHub Actions are pinned to commit SHAs.
+- Dependency updates; `npm audit --omit=dev` is clean.
+- Upstream requests no longer follow redirects, so the client secret (sent
+  in the body of the token requests) and bearer tokens are never resent to a
+  redirect target; a redirect is reported as an error. Upstream error bodies
+  are read up to 64 KB, and the document download cap is enforced while
+  streaming.
+- `PERSONIO_TIMEOUT_MS` is validated (1-600000) instead of becoming `NaN`.
+- The server reports the package version.
+
+### Upgrade notes
+
+- A deployment that binds a non-loopback address (for example `0.0.0.0` in a
+  container) now needs `MCP_HTTP_TOKEN` of at least 32 characters, or the
+  server exits at startup. A 64-character hex token (`openssl rand -hex 32`)
+  works unchanged.
+- Shorter tokens, tokens with whitespace or a trailing newline, and
+  non-numeric or out-of-range numeric settings are rejected at startup.
+- New optional variables: `MCP_HTTP_ALLOW_UNAUTHENTICATED`,
+  `MCP_ALLOWED_HOSTS`, `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS`.
+- `PERSONIO_TIMEOUT_MS` must be an integer between 1 and 600000.
+- `PERSONIO_TRUST_FORWARDED_USER` and `X-MCP-User` behave as before.
+
+Also in this release:
+
 
 Security hardening.
 
