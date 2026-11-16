@@ -1,0 +1,60 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.borgels/mcp-server-personio",
+  "title": "Personio",
+  "description": "MCP server for the Personio HR API with employee and HR-admin profiles.",
+  "repository": {
+    "url": "https://github.com/borgels/mcp-server-personio",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "mcp-server-personio",
+      "version": "0.2.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PERSONIO_CLIENT_ID",
+          "description": "Personio API client id (Settings, Integrations, API credentials).",
+          "isRequired": true
+        },
+        {
+          "name": "PERSONIO_CLIENT_SECRET",
+          "description": "Personio API client secret.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "PERSONIO_PROFILE",
+          "description": "Tool profile.",
+          "default": "employee",
+          "choices": [
+            "employee",
+            "hr"
+          ]
+        },
+        {
+          "name": "PERSONIO_HR_LEGAL_ENTITY",
+          "description": "HR profile only: legal entity id this instance is confined to."
+        },
+        {
+          "name": "PERSONIO_ENABLE_WRITES",
+          "description": "Enable the HR write tools.",
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "PERSONIO_AUDIT_LOG",
+          "description": "Path of the JSONL audit log.",
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

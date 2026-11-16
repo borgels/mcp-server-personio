@@ -1,6 +1,7 @@
 {
   "name": "mcp-server-personio",
   "version": "0.2.0",
+  "mcpName": "io.github.borgels/mcp-server-personio",
   "description": "MCP server for the Personio HR API with employee and HR-admin profiles.",
   "type": "module",
   "main": "./dist/stdio.js",
