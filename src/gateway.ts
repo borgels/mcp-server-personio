@@ -268,15 +268,17 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
     throw new ConfigError('options.timeoutMs must be an integer between 1 and 600000.');
   }
-  // Every option is given explicitly, so the client reads nothing from the environment.
+  const redactor = new SecretRedactor().addSecret(clientSecret).addSecret(clientId).addHeader('authorization');
+  // Every option is given explicitly, so the client reads nothing from the environment. Every access token Personio
+  // issues is a secret of this instance too: redacted from results, errors and audit records like the credentials.
   const client = new PersonioClient({
+    onAccessToken: token => void redactor.addSecret(token),
     clientId,
     clientSecret,
     baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
     timeoutMs,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
   });
-  const redactor = new SecretRedactor().addSecret(clientSecret).addSecret(clientId).addHeader('authorization');
   const tools = personioGatewayTools.filter(tool => !policy.disabledTools.has(tool.name));
 
   async function audit(record: Record<string, unknown>): Promise<void> {

@@ -7,6 +7,8 @@ export interface PersonioClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Called with every access token Personio issues, before it is used (the gateway redacts it from every output). */
+  onAccessToken?: (token: string) => void;
 }
 
 export type QueryValue = string | number | boolean | null | undefined | ReadonlyArray<string | number>;
@@ -35,6 +37,7 @@ export class PersonioClient {
   readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly onAccessToken?: (token: string) => void;
   private v2Token?: string;
   private v2ExpiresAt = 0;
   private v1Token?: string;
@@ -46,6 +49,7 @@ export class PersonioClient {
     this.baseUrl = trimTrailingSlash(options.baseUrl ?? process.env.PERSONIO_BASE_URL ?? 'https://api.personio.de');
     assertSafeBaseUrl(this.baseUrl);
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.onAccessToken = options.onAccessToken;
     this.timeoutMs =
       options.timeoutMs ?? readEnvInteger('PERSONIO_TIMEOUT_MS', 30_000, { min: 1, max: 600_000 });
   }
@@ -200,6 +204,7 @@ export class PersonioClient {
         fallbackMessage: 'Failed to obtain Personio v2 access token.',
       });
     }
+    this.onAccessToken?.(body.access_token);
     this.v2Token = body.access_token;
     this.v2ExpiresAt = Date.now() + (body.expires_in ?? 3600) * 1000;
     return this.v2Token;
@@ -227,6 +232,7 @@ export class PersonioClient {
         fallbackMessage: 'Failed to obtain Personio v1 token.',
       });
     }
+    this.onAccessToken?.(token);
     this.v1Token = token;
     this.v1ExpiresAt = Date.now() + V1_TOKEN_TTL_MS;
     return token;
