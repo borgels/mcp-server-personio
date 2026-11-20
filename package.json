@@ -1,12 +1,16 @@
 {
   "name": "mcp-server-personio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.borgels/mcp-server-personio",
   "description": "MCP server for the Personio HR API with employee and HR-admin profiles.",
   "type": "module",
-  "main": "./dist/stdio.js",
+  "main": "./dist/transports/stdio.js",
   "exports": {
-    ".": "./dist/stdio.js"
+    ".": "./dist/transports/stdio.js",
+    "./gateway": {
+      "types": "./dist/gateway.d.ts",
+      "default": "./dist/gateway.js"
+    }
   },
   "files": [
     "dist",
@@ -16,10 +20,10 @@
     ".env.example"
   ],
   "bin": {
-    "mcp-server-personio": "./dist/stdio.js"
+    "mcp-server-personio": "./dist/transports/stdio.js"
   },
   "scripts": {
-    "build": "tsup src/transports/stdio.ts src/transports/http.ts --format esm --dts --clean --sourcemap",
+    "build": "tsup src/transports/stdio.ts src/transports/http.ts src/gateway.ts --format esm --dts --clean --sourcemap",
     "dev": "tsx src/transports/stdio.ts",
     "dev:http": "tsx src/transports/http.ts",
     "typecheck": "tsc --noEmit",

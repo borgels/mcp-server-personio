@@ -73,6 +73,44 @@ startup with a message naming the variable. Rejected requests get a JSON error
 bodies) and one log line on stderr. The server shuts down gracefully on
 SIGTERM/SIGINT.
 
+## Embedding (`./gateway`)
+
+For a host that does its own per-user authorization (one instance per
+Personio company, several in one process), the package exports
+`mcp-server-personio/gateway`, in the shape of mcp-server-template:
+
+```ts
+import { createPersonioGateway, personioToolCatalog } from 'mcp-server-personio/gateway';
+
+const gateway = createPersonioGateway({
+  clientId,            // required; never read from the environment
+  clientSecret,        // required; admitted only if it shares no text with our own texts
+  policy: { enableWrites: true, disabledTools: [], audit: record => log(record) },
+});
+await gateway.callTool('list_absences', { startsAfter: '2026-08-01' }, { requestId });
+```
+
+- A gateway instance reads no `PERSONIO_*` variable. Without `policy`,
+  writes are off and nothing is audited. A write runs only if its audit
+  start record was accepted.
+- `personioToolCatalog` is deeply frozen: every tool with its risk level,
+  JSON Schema, the upstream requests it may make (`upstream`) and `broad`
+  (false for all).
+- The gateway has its own, curated tool table (`src/gateway/tools.ts`):
+  company structure, a headcount without names, absence types, projects,
+  persons and employments, absence and attendance periods, and two writes
+  (create an absence period, record an attendance period), both through
+  Personio's normal approval workflow.
+- Answers are built from allowlists of standard fields. A person's custom
+  attributes (where national id numbers, bank details, salary and birth
+  dates live) are never returned, whatever the API credential whitelists;
+  nor are the type and comment of an absence or the comment of an
+  attendance. There are no compensation, document, recruiting, report or
+  delete tools, and no change to a person or an employment.
+- Errors carry the HTTP status and our own text, never Personio's response
+  body. Every output is redacted with the instance's own credentials and
+  withheld whole if it would still hold a piece of one.
+
 ## Security model
 
 - The server calls Personio with one shared API credential (the client id and

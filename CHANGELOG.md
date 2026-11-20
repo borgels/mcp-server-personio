@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.3.0
+
+Embeddable gateway in the shape of mcp-server-template (#39).
+
+- New export `mcp-server-personio/gateway`: `createPersonioGateway({ clientId,
+  clientSecret, baseUrl?, fetchImpl?, timeoutMs?, policy? })`. Credentials are
+  required and never read from the environment; no `PERSONIO_*` variable is
+  read by a gateway instance.
+- Key admission against a generated corpus of our own texts
+  (`scripts/fixed-corpus.mjs`), sealed errors and a sink check on every output.
+- Host policy per instance: `enableWrites`, `disabledTools`, `audit` (a write
+  runs only if its start record was accepted).
+- Deeply frozen `personioToolCatalog` with `upstream` and `broad`.
+- A curated, company-wide tool table: answers from allowlists of standard
+  fields only (no custom attributes; no absence type or comment), no
+  compensation, document, recruiting, report or delete tools. Writes: create an
+  absence period, record an attendance period; both through the approval
+  workflow.
+- Errors in our own words with the HTTP status; Personio's bodies are never
+  passed on.
+- The build now writes `dist/transports/stdio.js` and `dist/transports/http.js`
+  (and `dist/gateway.js`); `main`, `bin` and the Dockerfile point there.
+
 - Published to npm and the MCP Registry from tagged releases.
 - stdio: `PERSONIO_DEFAULT_USER` sets the employee the `employee` profile acts as.
 
