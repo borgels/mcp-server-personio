@@ -230,4 +230,3 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
     ]),
   );
 }
-

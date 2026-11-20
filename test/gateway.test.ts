@@ -232,6 +232,7 @@ describe('answers', () => {
           employment_start_date: '2024-01-01',
         },
       ],
+      employmentsComplete: true,
     });
     const text = result.content[0]?.text ?? '';
     for (const word of ['010190', 'DK50', 'female', 'privat', '50000']) expect(text).not.toContain(word);
@@ -270,11 +271,41 @@ describe('answers', () => {
     await gw.callTool('list_attendances', { from: '2026-08-01', to: '2026-08-07' });
     const absences = new URL(sent[0]!.url).searchParams;
     expect(absences.get('person.id')).toBe('42');
-    expect(absences.get('ends_at.date_time.gte')).toBe('2026-08-01T00:00:00');
-    expect(absences.get('starts_from.date_time.lte')).toBe('2026-08-31T23:59:59');
+    expect(absences.get('ends_at.date_time.gte')).toBe('2026-08-01T00:00:00Z');
+    expect(absences.get('starts_from.date_time.lte')).toBe('2026-08-31T23:59:59Z');
     const attendances = new URL(sent[1]!.url).searchParams;
     expect(attendances.get('start.date_time.gte')).toBe('2026-08-01T00:00:00');
     expect(attendances.get('start.date_time.lte')).toBe('2026-08-07T23:59:59');
+  });
+
+  it('checks the 24 hours on wall-clock time, whatever the timezone of the host', async () => {
+    const original = process.env.TZ;
+    try {
+      for (const tz of ['UTC', 'Europe/Copenhagen', 'America/New_York']) {
+        process.env.TZ = tz;
+        const sent: Sent[] = [];
+        const gw = gateway(() => ({ body: { _data: { id: 't1' } } }), { writes: true, sent });
+        // The night daylight saving ends in Europe: 24 hours on the clock.
+        const ok = await gw.callTool('create_attendance', { personId: '42', type: 'WORK', start: '2026-10-24T08:00', end: '2026-10-25T08:00' });
+        expect(ok.isError, tz).toBeUndefined();
+        expect(sent, tz).toHaveLength(1);
+      }
+    } finally {
+      process.env.TZ = original;
+    }
+  });
+
+  it('reads every page of employments', async () => {
+    let page = 0;
+    const gw = gateway(url => {
+      if (!url.includes('/employments')) return { body: { _data: { id: '42' } } };
+      page += 1;
+      return page === 1
+        ? { body: { _data: [{ id: 'e1' }], _meta: { links: { next: { href: '/v2/persons/42/employments?cursor=c2' } } } } }
+        : { body: { _data: [{ id: 'e2' }] } };
+    });
+    const result = await gw.callTool('get_person', { personId: '42' });
+    expect(data(result)).toEqual({ person: { id: '42' }, employments: [{ id: 'e1' }, { id: 'e2' }], employmentsComplete: true });
   });
 
   it('records attendance with local date_time values and refuses a timezone offset', async () => {

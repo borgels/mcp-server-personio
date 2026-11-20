@@ -213,6 +213,9 @@ const pageShape = (cap: number) => ({
   cursor: cursor.optional(),
 });
 
+/** Most pages of employments get_person reads (50 each). */
+const EMPLOYMENT_MAX_PAGES = 5;
+
 /** Most pages headcount reads (50 persons each): 2,000 persons. */
 const HEADCOUNT_MAX_PAGES = 40;
 
@@ -363,8 +366,20 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     async run(client, input) {
       const personId = pathParam(input.personId as string, 'personId');
       const person = single(await client.get(`/v2/persons/${personId}`), PERSON);
-      const employments = rowsOf(await client.get(`/v2/persons/${personId}/employments`), EMPLOYMENT);
-      return { person, employments };
+      // Every page of employments, up to EMPLOYMENT_MAX_PAGES; complete says whether all were read.
+      const employments: Array<Record<string, unknown>> = [];
+      let next: string | undefined;
+      let complete = false;
+      for (let page = 0; page < EMPLOYMENT_MAX_PAGES; page += 1) {
+        const body = await client.get(`/v2/persons/${personId}/employments`, { limit: 50, cursor: next });
+        employments.push(...rowsOf(body, EMPLOYMENT));
+        next = nextCursor(body);
+        if (!next) {
+          complete = true;
+          break;
+        }
+      }
+      return { person, employments, employmentsComplete: complete };
     },
   },
   {
@@ -387,9 +402,10 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       const body = await client.get('/v2/absence-periods', {
         ...pageQuery(input, 100, 100),
         'person.id': input.personId as string | undefined,
-        // A period overlaps [from, to] when it ends on or after from and starts on or before to.
-        'ends_at.date_time.gte': typeof input.from === 'string' ? dayStart(input.from) : undefined,
-        'starts_from.date_time.lte': typeof input.to === 'string' ? dayEnd(input.to) : undefined,
+        // A period overlaps [from, to] when it ends on or after from and starts on or before to. Personio documents these
+        // filters with a UTC instant (…Z), unlike the attendance filters.
+        'ends_at.date_time.gte': typeof input.from === 'string' ? `${dayStart(input.from)}Z` : undefined,
+        'starts_from.date_time.lte': typeof input.to === 'string' ? `${dayEnd(input.to)}Z` : undefined,
       });
       return listResult(body, ABSENCE);
     },
@@ -475,8 +491,9 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     upstream: [TOKEN, { method: 'POST', path: '/v2/attendance-periods' }],
     summary: 'Personio recorded the attendance period; it follows Personio’s approval workflow.',
     async run(client, input) {
-      const start = Date.parse(input.start as string);
-      const end = Date.parse(input.end as string);
+      // Wall-clock times: read as if in UTC, so the host's own timezone (and its daylight saving) plays no part.
+      const start = Date.parse(`${withSeconds(input.start as string)}Z`);
+      const end = Date.parse(`${withSeconds(input.end as string)}Z`);
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 24 * 60 * 60 * 1000) {
         throw new GatewayInputError('The period must end after it starts and last at most 24 hours. Nothing was sent to Personio.');
       }
