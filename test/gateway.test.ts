@@ -408,6 +408,20 @@ describe('errors', () => {
     );
   });
 
+  it('redacts the access token Personio issued from an answer that echoes it', async () => {
+    const token = ['Tk9vQ2mX', '4bRz7LpW', '1nYc8HsD'].join('');
+    const fetchImpl = vi.fn(async (input: string | URL | Request) =>
+      String(input).endsWith('/v2/auth/token')
+        ? new Response(JSON.stringify({ access_token: token, expires_in: 3600 }))
+        : new Response(JSON.stringify({ _data: [{ id: '1', first_name: token, last_name: `x ${token.slice(2, 14)} y` }] })),
+    ) as unknown as typeof fetch;
+    const gw = createPersonioGateway({ clientId: CLIENT_ID, clientSecret: SECRET, fetchImpl });
+    const result = await gw.callTool('list_persons', {});
+    const text = JSON.stringify(result);
+    expect(text).not.toContain(token.slice(0, 6));
+    expect(text).not.toContain(token.slice(6, 12));
+  });
+
   it('withholds an answer that echoes the secret', async () => {
     const gw = gateway(() => ({ body: { _data: [{ id: '1', name: SECRET }] } }));
     const result = await gw.callTool('list_projects', {});

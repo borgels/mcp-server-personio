@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.1
+
+- Gateway: every access token Personio issues is redacted from results, errors
+  and audit records like the instance's credentials (`onAccessToken` on the
+  client).
+
 ## 0.3.0
 
 Embeddable gateway in the shape of mcp-server-template (#39).
