@@ -121,12 +121,46 @@ describe('credentials and key admission', () => {
 });
 
 describe('policy', () => {
-  it('keeps writes off without the host policy and with enableWrites false', async () => {
+  it('keeps writes off with enableWrites false', async () => {
     const sent: Sent[] = [];
     const gw = gateway(() => ({ body: {} }), { sent });
     const result = await gw.callTool('create_absence', { personId: '42', absenceTypeId: '7', startDate: '2026-08-03' });
     expect(result.isError).toBe(true);
     expect(sent).toHaveLength(0);
+  });
+
+  it('keeps writes off without a host policy, whatever PERSONIO_* says', async () => {
+    vi.stubEnv('PERSONIO_ENABLE_WRITES', 'true');
+    vi.stubEnv('PERSONIO_PROFILE', 'hr');
+    vi.stubEnv('PERSONIO_BASE_URL', 'https://elsewhere.example');
+    vi.stubEnv('PERSONIO_TIMEOUT_MS', 'not-a-number');
+    const sent: Sent[] = [];
+    const gw = createPersonioGateway({ clientId: CLIENT_ID, clientSecret: SECRET, fetchImpl: fakeFetch(() => ({ body: { _data: [] } }), sent) });
+    const write = await gw.callTool('create_absence', { personId: '42', absenceTypeId: '7', startDate: '2026-08-03' });
+    expect(write.isError).toBe(true);
+    await gw.callTool('list_projects', {});
+    expect(sent.map(s => s.url)).toEqual(['https://api.personio.de/v2/projects?limit=100']);
+  });
+
+  it('writes the audit start record before a write, without the secret, and keeps instances apart', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const sent: Sent[] = [];
+    const gw = gateway(() => ({ body: { _data: { id: 'a9' } } }), { writes: true, sent, audit: r => void records.push(r as Record<string, unknown>) });
+    const other = createPersonioGateway({
+      clientId: 'Ow3nCl1entIdX9yz',
+      clientSecret: ['Mb8rT1wQ', '5nVc2XpL', '7hKj4GdS', '9fYe3UaZ'].join(''),
+      fetchImpl: fakeFetch(() => ({ body: {} })),
+    });
+    const result = await gw.callTool(
+      'create_absence',
+      { personId: '42', absenceTypeId: '7', startDate: '2026-08-03' },
+      { requestId: `req-${SECRET}` },
+    );
+    expect(result.isError).toBeUndefined();
+    expect(records.map(r => r.action)).toEqual(['start', 'finish']);
+    expect(JSON.stringify(records)).not.toContain(SECRET.slice(0, 6));
+    expect(sent).toHaveLength(1);
+    expect((await other.callTool('create_absence', { personId: '42', absenceTypeId: '7', startDate: '2026-08-03' })).isError).toBe(true);
   });
 
   it('leaves out disabled tools and refuses unknown names in the policy', async () => {

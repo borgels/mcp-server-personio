@@ -95,7 +95,7 @@ export interface GatewayToolCatalogEntry {
   readonly requiresConfirmation: boolean;
 }
 
-/** Receives one audit record. A write runs only if its start record was accepted. */
+/** Receives one audit record. With a sink, a write runs only if its start record was accepted. */
 export type AuditSink = (record: Readonly<Record<string, unknown>>) => void | Promise<void>;
 
 /** Policy given by an embedding host for one gateway instance. */
@@ -104,7 +104,11 @@ export interface InstancePolicy {
   enableWrites?: boolean;
   /** Tools turned off on this instance, with or without the personio_ prefix. Must name known tools. */
   disabledTools?: readonly string[];
-  /** Receives the audit records of this instance's calls. Without it nothing is audited. */
+  /**
+   * Receives the audit records of this instance's calls; a write runs only if its start record was accepted. Without
+   * it nothing is audited, as in mcp-server-template: a host that enables writes without a sink keeps its own record of
+   * a change before it calls the tool.
+   */
   audit?: AuditSink;
 }
 

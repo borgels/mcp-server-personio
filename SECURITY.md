@@ -15,6 +15,9 @@ release, when one exists.
 
 ## Credential Handling
 
-This MCP server reads provider credentials only from the server environment and
-does not accept credentials as tool arguments. If you believe credentials were
+The MCP server reads provider credentials only from the server environment and
+does not accept credentials as tool arguments. The embeddable gateway
+(`mcp-server-personio/gateway`) takes them only from the host, as options to
+`createPersonioGateway`, and reads no `PERSONIO_*` variable; it never returns
+them, and redacts them from every result, error and audit record. If you believe credentials were
 exposed, rotate them with the upstream provider immediately.

@@ -91,8 +91,11 @@ await gateway.callTool('list_absences', { startsAfter: '2026-08-01' }, { request
 ```
 
 - A gateway instance reads no `PERSONIO_*` variable. Without `policy`,
-  writes are off and nothing is audited. A write runs only if its audit
-  start record was accepted.
+  writes are off and nothing is audited. With an `audit` sink, a write
+  runs only if its start record was accepted (a sink that throws refuses
+  the write). Without one, the instance writes no audit records: a host
+  that turns writes on without a sink keeps its own record of the change
+  before it calls the tool.
 - `personioToolCatalog` is deeply frozen: every tool with its risk level,
   JSON Schema, the upstream requests it may make (`upstream`) and `broad`
   (false for all).

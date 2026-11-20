@@ -12,8 +12,9 @@ Embeddable gateway in the shape of mcp-server-template (#39).
   read by a gateway instance.
 - Key admission against a generated corpus of our own texts
   (`scripts/fixed-corpus.mjs`), sealed errors and a sink check on every output.
-- Host policy per instance: `enableWrites`, `disabledTools`, `audit` (a write
-  runs only if its start record was accepted).
+- Host policy per instance: `enableWrites`, `disabledTools`, `audit` (with a
+  sink, a write runs only if its start record was accepted; without one,
+  nothing is audited and the host keeps its own record).
 - Deeply frozen `personioToolCatalog` with `upstream` and `broad`.
 - A curated, company-wide tool table: answers from allowlists of standard
   fields only (no custom attributes; no absence type or comment), no
