@@ -246,21 +246,52 @@ describe('answers', () => {
             person: { id: '42', first_name: 'Anna' },
             absence_type: { id: '3', name: 'Sygdom' },
             comment: 'influenza',
-            starts_from: { date: '2026-08-03', type: 'FIRST_HALF' },
-            ends_at: { date: '2026-08-04' },
+            starts_from: { date_time: '2026-08-03T00:00:00', type: 'FIRST_HALF' },
+            ends_at: { date_time: '2026-08-04T00:00:00' },
           },
         ],
         _meta: { links: { next: { href: 'https://api.personio.de/v2/absence-periods?cursor=abc123&limit=100' } } },
       },
     }));
-    const result = await gw.callTool('list_absences', { startsAfter: '2026-08-01' });
+    const result = await gw.callTool('list_absences', { from: '2026-08-01', to: '2026-08-31' });
     expect(data(result)).toEqual({
       items: [
-        { id: 'a1', person: { id: '42' }, starts_from: { date: '2026-08-03', type: 'FIRST_HALF' }, ends_at: { date: '2026-08-04' } },
+        { id: 'a1', person: { id: '42' }, starts_from: { date_time: '2026-08-03T00:00:00', type: 'FIRST_HALF' }, ends_at: { date_time: '2026-08-04T00:00:00' } },
       ],
       nextCursor: 'abc123',
     });
     expect(JSON.stringify(result)).not.toMatch(/Sygdom|influenza/);
+  });
+
+  it('filters absences and attendances with the date_time parameters Personio documents', async () => {
+    const sent: Sent[] = [];
+    const gw = gateway(() => ({ body: { _data: [] } }), { sent });
+    await gw.callTool('list_absences', { personId: '42', from: '2026-08-01', to: '2026-08-31' });
+    await gw.callTool('list_attendances', { from: '2026-08-01', to: '2026-08-07' });
+    const absences = new URL(sent[0]!.url).searchParams;
+    expect(absences.get('person.id')).toBe('42');
+    expect(absences.get('ends_at.date_time.gte')).toBe('2026-08-01T00:00:00');
+    expect(absences.get('starts_from.date_time.lte')).toBe('2026-08-31T23:59:59');
+    const attendances = new URL(sent[1]!.url).searchParams;
+    expect(attendances.get('start.date_time.gte')).toBe('2026-08-01T00:00:00');
+    expect(attendances.get('start.date_time.lte')).toBe('2026-08-07T23:59:59');
+  });
+
+  it('records attendance with local date_time values and refuses a timezone offset', async () => {
+    const sent: Sent[] = [];
+    const gw = gateway(() => ({ body: { _data: { id: 't1' } } }), { writes: true, sent });
+    const ok = await gw.callTool('create_attendance', { personId: '42', type: 'WORK', start: '2026-08-03T08:00', end: '2026-08-03T12:00', projectId: '5' });
+    expect(ok.isError).toBeUndefined();
+    expect(JSON.parse(sent[0]!.body!)).toEqual({
+      person: { id: '42' },
+      type: 'WORK',
+      start: { date_time: '2026-08-03T08:00:00' },
+      end: { date_time: '2026-08-03T12:00:00' },
+      project: { id: '5' },
+    });
+    const offset = await gw.callTool('create_attendance', { personId: '42', type: 'WORK', start: '2026-08-03T08:00:00Z', end: '2026-08-03T12:00:00Z' });
+    expect(offset.isError).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 
   it('counts persons by status across pages without names', async () => {
@@ -292,8 +323,8 @@ describe('answers', () => {
     expect(JSON.parse(sent[0]?.body ?? '{}')).toEqual({
       person: { id: '42' },
       absence_type: { id: '7' },
-      starts_from: { date: '2026-08-03' },
-      ends_at: { date: '2026-08-14' },
+      starts_from: { date_time: '2026-08-03T00:00:00' },
+      ends_at: { date_time: '2026-08-14T00:00:00' },
     });
     expect(await gw.callTool('create_absence', { personId: '42', absenceTypeId: '7', startDate: '2026-08-03', comment: 'x' })).toMatchObject({
       isError: true,
@@ -306,14 +337,14 @@ describe('answers', () => {
     const long = await gw.callTool('create_attendance', {
       personId: '42',
       type: 'WORK',
-      start: '2026-08-03T08:00:00Z',
-      end: '2026-08-04T09:00:00Z',
+      start: '2026-08-03T08:00',
+      end: '2026-08-04T09:00',
     });
     const brk = await gw.callTool('create_attendance', {
       personId: '42',
       type: 'BREAK',
-      start: '2026-08-03T12:00:00Z',
-      end: '2026-08-03T12:30:00Z',
+      start: '2026-08-03T12:00',
+      end: '2026-08-03T12:30',
       projectId: '5',
     });
     expect(long.isError).toBe(true);

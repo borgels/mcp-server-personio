@@ -57,10 +57,15 @@ const id = z
   .trim()
   .regex(/^[A-Za-z0-9_-]{1,64}$/, 'an id of letters, digits, - or _');
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
-const dateTime = z
+/** A local date and time as Personio takes it: no timezone offset (the period's own timezone applies). */
+const localDateTime = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/, 'ISO 8601 date and time');
-const dateOrDateTime = z.union([date, dateTime]);
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/, 'local date and time, YYYY-MM-DDTHH:MM[:SS], without a timezone');
+
+/** The start of a day, as Personio's date_time fields and filters take it. */
+const dayStart = (day: string) => `${day}T00:00:00`;
+const dayEnd = (day: string) => `${day}T23:59:59`;
+const withSeconds = (value: string) => (value.length === 16 ? `${value}:00` : value);
 const half = z.enum(['FIRST_HALF', 'SECOND_HALF']);
 const cursor = z.string().trim().min(1).max(2000).regex(/^[\x21-\x7e]+$/, 'printable');
 
@@ -108,9 +113,9 @@ const EMPLOYMENT: Spec = {
 const ABSENCE: Spec = {
   id: true,
   person: REF,
-  starts_from: { date: true, type: true },
-  ends_at: { date: true, type: true },
-  status: true,
+  starts_from: { date_time: true, type: true },
+  ends_at: { date_time: true, type: true },
+  timezone_id: true,
   approval: { status: true },
   created_at: true,
   updated_at: true,
@@ -122,7 +127,8 @@ const ATTENDANCE: Spec = {
   type: true,
   start: { date_time: true },
   end: { date_time: true },
-  status: true,
+  duration: true,
+  attribution_date: true,
   approval: { status: true },
   project: REF,
   created_at: true,
@@ -365,13 +371,13 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     name: 'list_absences',
     title: 'List absences',
     description:
-      'Absence periods: person, start, end (half days included) and status. The absence type and the comment are left out. Filter by personId and dates.',
+      'Absence periods: person, start, end (half days included), timezone and approval status. The absence type and the comment are left out. Filter by personId and by a date range (from, to): periods that overlap it.',
     risk: 'read',
     inputSchema: z
       .object({
         personId: id.optional(),
-        startsAfter: date.optional(),
-        endsBefore: date.optional(),
+        from: date.optional(),
+        to: date.optional(),
         ...pageShape(100),
       })
       .strict(),
@@ -381,8 +387,9 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       const body = await client.get('/v2/absence-periods', {
         ...pageQuery(input, 100, 100),
         'person.id': input.personId as string | undefined,
-        'starts_from.date.gte': input.startsAfter as string | undefined,
-        'ends_at.date.lte': input.endsBefore as string | undefined,
+        // A period overlaps [from, to] when it ends on or after from and starts on or before to.
+        'ends_at.date_time.gte': typeof input.from === 'string' ? dayStart(input.from) : undefined,
+        'starts_from.date_time.lte': typeof input.to === 'string' ? dayEnd(input.to) : undefined,
       });
       return listResult(body, ABSENCE);
     },
@@ -391,13 +398,13 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     name: 'list_attendances',
     title: 'List attendances',
     description:
-      'Recorded work and break periods: person, type, start, end, project and status. The comment is left out. Filter by personId and time.',
+      'Recorded work and break periods: person, type, start, end, duration, project and approval status. The comment is left out. Filter by personId and by the days they start on (from, to).',
     risk: 'read',
     inputSchema: z
       .object({
         personId: id.optional(),
-        startsAfter: dateOrDateTime.optional(),
-        endsBefore: dateOrDateTime.optional(),
+        from: date.optional(),
+        to: date.optional(),
         ...pageShape(100),
       })
       .strict(),
@@ -407,8 +414,8 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       const body = await client.get('/v2/attendance-periods', {
         ...pageQuery(input, 100, 100),
         'person.id': input.personId as string | undefined,
-        'starts_from.gte': input.startsAfter as string | undefined,
-        'ends_at.lte': input.endsBefore as string | undefined,
+        'start.date_time.gte': typeof input.from === 'string' ? dayStart(input.from) : undefined,
+        'start.date_time.lte': typeof input.to === 'string' ? dayEnd(input.to) : undefined,
       });
       return listResult(body, ATTENDANCE);
     },
@@ -442,8 +449,10 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       const body = await client.post('/v2/absence-periods', {
         person: { id: input.personId },
         absence_type: { id: input.absenceTypeId },
-        starts_from: { date: input.startDate, ...(input.startHalf ? { type: input.startHalf } : {}) },
-        ...(input.endDate ? { ends_at: { date: input.endDate, ...(input.endHalf ? { type: input.endHalf } : {}) } } : {}),
+        starts_from: { date_time: dayStart(input.startDate as string), ...(input.startHalf ? { type: input.startHalf } : {}) },
+        ...(input.endDate
+          ? { ends_at: { date_time: dayStart(input.endDate as string), ...(input.endHalf ? { type: input.endHalf } : {}) } }
+          : {}),
       });
       return { created: single(body, ABSENCE) };
     },
@@ -452,14 +461,14 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     name: 'create_attendance',
     title: 'Create attendance',
     description:
-      'Records a work or break period for a person (start and end as ISO 8601, at most 24 hours, project for work only). It enters Personio’s normal approval workflow.',
+      'Records a work or break period for a person (start and end as local date and time without a timezone, at most 24 hours, project for work only). It enters Personio’s normal approval workflow.',
     risk: 'write',
     inputSchema: z
       .object({
         personId: id,
         type: z.enum(['WORK', 'BREAK']),
-        start: dateTime,
-        end: dateTime,
+        start: localDateTime,
+        end: localDateTime,
         projectId: id.optional(),
       })
       .strict(),
@@ -478,8 +487,8 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       const body = await client.post('/v2/attendance-periods', {
         person: { id: input.personId },
         type: input.type,
-        start: { date_time: input.start },
-        end: { date_time: input.end },
+        start: { date_time: withSeconds(input.start as string) },
+        end: { date_time: withSeconds(input.end as string) },
         ...(input.projectId ? { project: { id: input.projectId } } : {}),
       });
       return { created: single(body, ATTENDANCE) };

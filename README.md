@@ -87,7 +87,7 @@ const gateway = createPersonioGateway({
   clientSecret,        // required; admitted only if it shares no text with our own texts
   policy: { enableWrites: true, disabledTools: [], audit: record => log(record) },
 });
-await gateway.callTool('list_absences', { startsAfter: '2026-08-01' }, { requestId });
+await gateway.callTool('list_absences', { from: '2026-08-01', to: '2026-08-31' }, { requestId });
 ```
 
 - A gateway instance reads no `PERSONIO_*` variable. Without `policy`,
