@@ -1,5 +1,5 @@
 import { readEnvInteger } from '../config-env.js';
-import { PersonioHttpError } from '../errors.js';
+import { PersonioHttpError, requestIdFrom } from '../errors.js';
 
 export interface PersonioClientOptions {
   clientId?: string;
@@ -80,7 +80,12 @@ export class PersonioClient {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) {
-      throw new PersonioHttpError({ status: response.status, url, payload: await readBody(response) });
+      throw new PersonioHttpError({
+        status: response.status,
+        url,
+        requestId: requestIdFrom(response.headers),
+        payload: await readBody(response),
+      });
     }
     const declared = Number(response.headers.get('content-length') ?? Number.NaN);
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -127,6 +132,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         fallbackMessage: extractV1Error(responseBody),
       });
@@ -164,6 +170,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: null,
         fallbackMessage: 'Redirect not followed (check PERSONIO_BASE_URL).',
       });
@@ -200,6 +207,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: body,
         fallbackMessage: 'Failed to obtain Personio v2 access token.',
       });
@@ -228,6 +236,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: body,
         fallbackMessage: 'Failed to obtain Personio v1 token.',
       });
@@ -280,6 +289,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         retryAfter: response.headers.get('retry-after') ?? undefined,
         fallbackMessage: typeof responseBody === 'string' ? responseBody : undefined,
@@ -291,6 +301,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         fallbackMessage: extractV1Error(responseBody),
       });

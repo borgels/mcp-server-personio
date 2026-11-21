@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.0 (2026-11-21)
+
+- Gateway error results carry failure metadata: when Personio answered with
+  an HTTP error (a refused token request or redirect, or a v1 answer with
+  `success: false`, included), the result has `failure: { httpStatus,
+  requestId? }`, so a host can count failures by status without reading
+  their text. `requestId` is the vendor's own id from a response header
+  (`REQUEST_ID_HEADERS`; Personio documents none, so the common list), kept
+  only when it is a hex id of 8 to 64 characters (one run of hex digits, or
+  groups of four or more joined by single hyphens, as in a UUID) and does not
+  hold the shape of a personal number. It is checked again after redaction,
+  so an id that shared a piece with a credential or access token is dropped.
+  Never the body, the vendor's error code, message or trace id. The shared
+  helpers are in `src/errors.ts` (`vendorRequestId`, `requestIdFrom`,
+  `failureMetadata`).
+
 ## 0.3.1
 
 - Gateway: every access token Personio issues is redacted from results, errors
