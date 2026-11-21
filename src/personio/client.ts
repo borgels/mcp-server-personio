@@ -1,5 +1,5 @@
 import { readEnvInteger } from '../config-env.js';
-import { PersonioHttpError } from '../errors.js';
+import { PersonioHttpError, requestIdFrom } from '../errors.js';
 
 export interface PersonioClientOptions {
   clientId?: string;
@@ -80,7 +80,12 @@ export class PersonioClient {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) {
-      throw new PersonioHttpError({ status: response.status, url, payload: await readBody(response) });
+      throw new PersonioHttpError({
+        status: response.status,
+        url,
+        requestId: requestIdFrom(response.headers),
+        payload: await readBody(response),
+      });
     }
     const declared = Number(response.headers.get('content-length') ?? Number.NaN);
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -127,6 +132,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         fallbackMessage: extractV1Error(responseBody),
       });
@@ -164,6 +170,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: null,
         fallbackMessage: 'Redirect not followed (check PERSONIO_BASE_URL).',
       });
@@ -200,6 +207,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: body,
         fallbackMessage: 'Failed to obtain Personio v2 access token.',
       });
@@ -228,6 +236,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: body,
         fallbackMessage: 'Failed to obtain Personio v1 token.',
       });
@@ -280,6 +289,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         retryAfter: response.headers.get('retry-after') ?? undefined,
         fallbackMessage: typeof responseBody === 'string' ? responseBody : undefined,
@@ -291,6 +301,7 @@ export class PersonioClient {
       throw new PersonioHttpError({
         status: response.status,
         url,
+        requestId: requestIdFrom(response.headers),
         payload: responseBody,
         fallbackMessage: extractV1Error(responseBody),
       });
@@ -305,7 +316,8 @@ function isV1Failure(value: unknown): boolean {
 }
 
 function extractV1Error(value: unknown): string {
-  const error = (value as { error?: { message?: string; code?: number } }).error;
+  // An answer without a body (or one that could not be read) has no error object.
+  const error = typeof value === 'object' && value !== null ? (value as { error?: { message?: string; code?: number } }).error : undefined;
   return error?.message ?? 'Personio v1 request failed (success: false).';
 }
 
@@ -317,9 +329,15 @@ async function readBody(response: Response): Promise<unknown> {
   if (response.ok) {
     text = await response.text();
   } else {
-    const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
-    text = Buffer.from(bytes).toString('utf8');
-    if (exceeded) {
+    // An error body that cannot be read is left out: the HTTP error, its status and request id still stand.
+    let read: { bytes: Uint8Array; exceeded: boolean };
+    try {
+      read = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+    } catch {
+      return null;
+    }
+    text = Buffer.from(read.bytes).toString('utf8');
+    if (read.exceeded) {
       return `${text}... [truncated]`;
     }
   }

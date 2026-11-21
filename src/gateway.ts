@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 import { ConfigError } from './config-env.js';
-import { PersonioHttpError } from './errors.js';
+import { failureMetadata, PersonioHttpError, vendorRequestId, type FailureMetadata } from './errors.js';
 import { fixedOutputs, withheldAuditRecord, withheldResult } from './fallbacks.js';
 import { admitsKey, keyRefusedText, leaksSecret, sealedError } from './key-admission.js';
 import { PersonioClient } from './personio/client.js';
@@ -56,10 +56,19 @@ export interface GatewayToolDefinition {
   inputSchema: GatewayJsonObject;
 }
 
+/**
+ * Metadata about a failed call, on an error result whose cause is known: the HTTP status Personio answered with,
+ * and its own request id when a response header gives one as a UUID or hex id. For a host that counts failures
+ * without reading their text. Never the response body, the vendor's error code or message, or the input.
+ */
+export type GatewayFailure = FailureMetadata;
+
 export interface GatewayToolResult {
   content: Array<{ type: 'text'; text: string }>;
   structuredContent?: GatewayJsonValue;
   isError?: boolean;
+  /** On an error result from Personio only: its HTTP status and request id (see GatewayFailure). */
+  failure?: GatewayFailure;
 }
 
 export interface GatewayCallContext {
@@ -311,7 +320,7 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
     } catch (error) {
       const text = errorText(error, tool.risk === 'write');
       await audit({ timestamp: new Date().toISOString(), ...base, action: 'error', status: statusOf(error) ?? null }).catch(() => undefined);
-      return errorResult(text);
+      return errorResult(text, failureMetadata(error));
     }
   }
 
@@ -321,8 +330,11 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
       return runCall(toolName, input, context).then(result => {
         // Redacted as data, copied as JSON, the data also put in the text, then the sink check on the final form.
+        // The failure metadata is checked again after redaction: an id that redaction changed is dropped.
         const final = withDataInText(
-          JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
+          withFailureInForm(
+            JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult,
+          ),
         );
         return leaksSecret(final, redactor) ? withheldResult() : final;
       });
@@ -377,6 +389,19 @@ function withDataInText(result: GatewayToolResult): GatewayToolResult {
   };
 }
 
-function errorResult(text: string): GatewayToolResult {
-  return { isError: true, content: [{ type: 'text', text }] };
+function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult {
+  return { isError: true, content: [{ type: 'text', text }], ...(failure ? { failure } : {}) };
+}
+
+/**
+ * The failure metadata as it must be after redaction: on an error result only, a status of 100-599 and a request id
+ * still in the form of one (redaction can have changed it). Anything else is dropped, never passed on.
+ */
+function withFailureInForm(result: GatewayToolResult): GatewayToolResult {
+  const { failure, ...rest } = result;
+  if (!result.isError || failure === undefined || failure === null || typeof failure !== 'object') return rest;
+  const status = failure.httpStatus;
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return rest;
+  const requestId = vendorRequestId(failure.requestId);
+  return { ...rest, failure: requestId === undefined ? { httpStatus: status } : { httpStatus: status, requestId } };
 }

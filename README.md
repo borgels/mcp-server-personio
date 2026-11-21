@@ -111,7 +111,15 @@ await gateway.callTool('list_absences', { from: '2026-08-01', to: '2026-08-31' }
   attendance. There are no compensation, document, recruiting, report or
   delete tools, and no change to a person or an employment.
 - Errors carry the HTTP status and our own text, never Personio's response
-  body. Every output is redacted with the instance's own credentials and
+  body. When Personio answered with an HTTP error (a refused token request or
+  redirect, or a v1 answer with `success: false`, included), the error result
+  also has `failure: { httpStatus, requestId? }`: the status, and Personio's
+  request id from a response header (`REQUEST_ID_HEADERS` in
+  `src/errors.ts`) only when it is a hex id of 8 to 64 characters (one run of
+  hex digits, or groups of four or more joined by single hyphens, as in a
+  UUID) and does not hold the shape of a personal number. A host can count
+  failures from it without reading their text. Never the response body,
+  Personio's error code, message or trace id. Every output is redacted with the instance's own credentials and
   withheld whole if it would still hold a piece of one.
 
 ## Security model
