@@ -328,9 +328,15 @@ async function readBody(response: Response): Promise<unknown> {
   if (response.ok) {
     text = await response.text();
   } else {
-    const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
-    text = Buffer.from(bytes).toString('utf8');
-    if (exceeded) {
+    // An error body that cannot be read is left out: the HTTP error, its status and request id still stand.
+    let read: { bytes: Uint8Array; exceeded: boolean };
+    try {
+      read = await readUpTo(response, MAX_ERROR_BODY_BYTES);
+    } catch {
+      return null;
+    }
+    text = Buffer.from(read.bytes).toString('utf8');
+    if (read.exceeded) {
       return `${text}... [truncated]`;
     }
   }

@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { failureMetadata, PersonioHttpError, requestIdFrom, vendorRequestId } from '../src/errors.js';
 import { createPersonioGateway } from '../src/gateway.js';
+import { PersonioClient } from '../src/personio/client.js';
 
 const CLIENT_ID = 'Kx4mPq8vRt2nWz6y';
 // Built at run time, so a scanner does not take a test value for a real credential.
@@ -121,6 +122,36 @@ describe('gateway error results', () => {
     expect(JSON.stringify(result)).not.toContain('elsewhere');
   });
 
+  it('carry the status and request id when the error body cannot be read', async () => {
+    const fetchImpl = (async (input: string | URL | Request) => {
+      if (String(input) === TOKEN_URL) {
+        return new Response(JSON.stringify({ access_token: 'tok-abcdefghijklmnop', expires_in: 3600 }), { status: 200 });
+      }
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"detail":"Jane'));
+          controller.error(new Error('stream broke'));
+        },
+      });
+      return new Response(body, { status: 503, headers: { 'x-request-id': UUID } });
+    }) as typeof fetch;
+    const gw = createPersonioGateway({ clientId: CLIENT_ID, clientSecret: SECRET, fetchImpl });
+    const result = await gw.callTool('get_person', { personId: '42' });
+    expect(result.isError).toBe(true);
+    expect(result.failure).toEqual({ httpStatus: 503, requestId: UUID });
+    expect(JSON.stringify(result)).not.toContain('Jane');
+  });
+
+  it('drop a request id that holds a piece of an access token', async () => {
+    // Every access token Personio issues is a secret of the instance: an id that shares a piece with it is dropped.
+    const result = await gatewayAnswering(
+      { status: 500, headers: { 'x-request-id': 'cafe0123456789ab' } },
+      { token: { status: 200, body: { access_token: 'tok-cafe0123456789abcdef', expires_in: 3600 } } },
+    ).callTool('get_person', { personId: '42' });
+    expect(result.failure).toEqual({ httpStatus: 500 });
+    expect(JSON.stringify(result)).not.toContain('cafe0123');
+  });
+
   it('carry the status alone when the request id is not in the form of one', async () => {
     const result = await gatewayAnswering({ status: 422, headers: { 'x-request-id': 'Jane Doe <jane@example.com>' } }).callTool(
       'get_person',
@@ -163,5 +194,61 @@ describe('gateway error results', () => {
     );
     expect(result.isError).toBeUndefined();
     expect(result.failure).toBeUndefined();
+  });
+});
+
+describe('the client keeps the status and request id on every Personio HTTP error', () => {
+  const BASE = 'https://api.personio.de';
+
+  function client(answer: (url: string) => Answer) {
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const { status, headers = {}, body = BODY } = answer(String(input));
+      return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+    }) as typeof fetch;
+    return new PersonioClient({ clientId: CLIENT_ID, clientSecret: SECRET, baseUrl: BASE, fetchImpl, timeoutMs: 5_000 });
+  }
+
+  const V1_TOKEN = { status: 200, body: { success: true, data: { token: 'v1-tok-abcdefghijkl' } } };
+
+  async function failureOf(work: () => Promise<unknown>) {
+    const error = await work().then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PersonioHttpError);
+    return failureMetadata(error);
+  }
+
+  it('on a refused v1 token request', async () => {
+    const c = client(() => ({ status: 403, headers: { 'request-id': UUID } }));
+    expect(await failureOf(() => c.get('/company/employees'))).toEqual({ httpStatus: 403, requestId: UUID });
+  });
+
+  it('on a v1 answer with success: false (HTTP 200)', async () => {
+    const c = client(url => (url.endsWith('/v1/auth') ? V1_TOKEN : { status: 200, headers: { 'x-request-id': UUID } }));
+    expect(await failureOf(() => c.get('/company/employees'))).toEqual({ httpStatus: 200, requestId: UUID });
+  });
+
+  it('on a failed v1 upload', async () => {
+    const c = client(url => (url.endsWith('/v1/auth') ? V1_TOKEN : { status: 422, headers: { 'x-request-id': UUID } }));
+    const upload = () =>
+      c.postMultipartV1('/company/document-management/documents', { employee_id: 1 }, {
+        fieldName: 'file',
+        fileName: 'a.txt',
+        contentBase64: Buffer.from('x').toString('base64'),
+      });
+    expect(await failureOf(upload)).toEqual({ httpStatus: 422, requestId: UUID });
+  });
+
+  it('on a failed download', async () => {
+    const c = client(url =>
+      url.endsWith('/v2/auth/token')
+        ? { status: 200, body: { access_token: 'tok-abcdefghijklmnop', expires_in: 3600 } }
+        : { status: 404, headers: { 'x-request-id': UUID } },
+    );
+    expect(await failureOf(() => c.getBinary('/v2/document-management/documents/1/download', 1024))).toEqual({
+      httpStatus: 404,
+      requestId: UUID,
+    });
   });
 });
