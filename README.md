@@ -97,8 +97,8 @@ await gateway.callTool('list_absences', { from: '2026-08-01', to: '2026-08-31' }
   that turns writes on without a sink keeps its own record of the change
   before it calls the tool.
 - `personioToolCatalog` is deeply frozen: every tool with its risk level,
-  JSON Schema, the upstream requests it may make (`upstream`) and `broad`
-  (false for all).
+  JSON Schema, the upstream requests it may make (`upstream`), `broad`
+  (false for all) and `self` (true for the self tools, see below).
 - The gateway has its own, curated tool table (`src/gateway/tools.ts`):
   company structure, a headcount without names, absence types, projects,
   persons and employments, absence and attendance periods, and two writes
@@ -121,6 +121,37 @@ await gateway.callTool('list_absences', { from: '2026-08-01', to: '2026-08-31' }
   failures from it without reading their text. Never the response body,
   Personio's error code, message or trace id. Every output is redacted with the instance's own credentials and
   withheld whole if it would still hold a piece of one.
+
+### Acting as the person (`actAs`)
+
+A host that has verified who the person is (signed in, email confirmed) can
+pass `actAs: { email, name? }` in the call context:
+
+```ts
+await gateway.callTool('create_my_absence', { absenceTypeId: '7', startDate: '2026-08-03' }, { requestId, actAs: { email } });
+```
+
+- The self tools (catalog `self: true`) work only on that person:
+  `get_my_profile`, `list_my_absences`, `list_my_attendances`,
+  `create_my_absence` and `create_my_attendance`. Their input never names a
+  person (`personId` is refused), so they cannot read or change anyone
+  else's data. The same allowlists apply as for the company-wide tools: no
+  custom attributes, no absence type or comment.
+- The person is found with `GET /v2/persons?email=…`: exactly one person
+  whose work email matches case-insensitively and who is not `INACTIVE`.
+  None, several or an inactive one: nothing more is sent, and the error
+  result has `actAsRefused: 'no_user'`. A self tool without `actAs`, or any
+  call with a malformed `actAs`, has `actAsRefused: 'invalid'`. There is no
+  fallback to another person or to the company-wide tools.
+- The writes enter Personio's normal approval workflow, as the company-wide
+  ones do; Personio records them through the API credential, on the person.
+- The company-wide tools ignore `actAs`.
+- The email is only sent to Personio as the filter that finds the person.
+  It is never written to the audit and never put in a text of ours
+  (`ACT_AS_TEXTS` are fixed).
+- The API credential needs read access to persons (with the email
+  attribute) and write access to absence and attendance periods, as for the
+  company-wide tools.
 
 ## Security model
 

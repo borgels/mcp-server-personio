@@ -1,6 +1,7 @@
 import { z } from 'zod/v4';
 import type { PersonioClient, QueryValue } from '../personio/client.js';
 import { pathParam } from '../personio/path.js';
+import { ActAsRefusedError } from '../act-as.js';
 
 /**
  * The gateway's tool table (src/gateway.ts): a curated, company-wide HR
@@ -19,6 +20,11 @@ import { pathParam } from '../personio/path.js';
  *
  * The two writes create an absence period or an attendance period. Neither
  * sends skip_approval, so both enter Personio's normal approval workflow.
+ *
+ * The self tools (`self: true`, names with `my`) work on one person only: the
+ * person the host gives as `actAs`, found by their work email
+ * (resolveSelf). They take no person id in their input, so they can never
+ * read or change another person's data.
  */
 
 export type GatewayToolRisk = 'read' | 'write';
@@ -39,7 +45,12 @@ export interface GatewayTool {
   readonly upstream: readonly UpstreamOperation[];
   /** Our own one-line summary, the first text of a successful result. */
   readonly summary: string;
-  run(client: PersonioClient, input: Record<string, unknown>): Promise<unknown>;
+  /**
+   * True for a self tool: it runs only for the person in `actAs`, whose Personio id the gateway resolves first and
+   * passes as `self`. A self tool's input never names a person.
+   */
+  readonly self?: true;
+  run(client: PersonioClient, input: Record<string, unknown>, self?: string): Promise<unknown>;
 }
 
 /** A refusal in our own words, raised by a tool before anything is sent. Its message is passed on. */
@@ -227,6 +238,135 @@ const ORG_KINDS = {
   workplaces: { path: '/v2/workplaces', beta: true, type: undefined },
 } as const;
 
+/**
+ * The person a self tool runs for: exactly one person whose work email matches `email` case-insensitively and who is
+ * not inactive. Anything else (none, several, inactive, a row without a usable id) is ActAsRefusedError('no_user'):
+ * nothing is read or changed. The email is only sent to Personio as the filter; it is never part of a text of ours.
+ */
+export async function resolveSelf(client: PersonioClient, email: string): Promise<string> {
+  const wanted = email.trim().toLowerCase();
+  // Two rows asked for, so a second person with the address is seen and refused, never guessed.
+  const body = await client.get('/v2/persons', { email: wanted, limit: 2 });
+  const data = isRecord(body) && Array.isArray(body._data) ? body._data : [];
+  const matches = data.filter(row => isRecord(row) && workEmail(row.email) === wanted);
+  if (data.length !== 1 || matches.length !== 1) throw new ActAsRefusedError('no_user');
+  const person = matches[0] as Record<string, unknown>;
+  const status = typeof person.status === 'string' ? person.status.toUpperCase() : '';
+  const personId = typeof person.id === 'string' || typeof person.id === 'number' ? String(person.id) : '';
+  if (status === 'INACTIVE' || !/^[A-Za-z0-9_-]{1,64}$/.test(personId)) throw new ActAsRefusedError('no_user');
+  return personId;
+}
+
+function workEmail(value: unknown): string | undefined {
+  const raw = typeof value === 'string' ? value : isRecord(value) && typeof value.value === 'string' ? value.value : undefined;
+  return raw?.trim().toLowerCase();
+}
+
+async function personWithEmployments(client: PersonioClient, id: string) {
+  const personId = pathParam(id, 'personId');
+  const person = single(await client.get(`/v2/persons/${personId}`), PERSON);
+  // Every page of employments, up to EMPLOYMENT_MAX_PAGES; complete says whether all were read.
+  const employments: Array<Record<string, unknown>> = [];
+  let next: string | undefined;
+  let complete = false;
+  for (let page = 0; page < EMPLOYMENT_MAX_PAGES; page += 1) {
+    const body = await client.get(`/v2/persons/${personId}/employments`, { limit: 50, cursor: next });
+    employments.push(...rowsOf(body, EMPLOYMENT));
+    next = nextCursor(body);
+    if (!next) {
+      complete = true;
+      break;
+    }
+  }
+  return { person, employments, employmentsComplete: complete };
+}
+
+async function absencePeriods(client: PersonioClient, input: Record<string, unknown>, personId: string | undefined) {
+  const body = await client.get('/v2/absence-periods', {
+    ...pageQuery(input, 100, 100),
+    'person.id': personId,
+    // A period overlaps [from, to] when it ends on or after from and starts on or before to. Personio documents these
+    // filters with a UTC instant (…Z), unlike the attendance filters.
+    'ends_at.date_time.gte': typeof input.from === 'string' ? `${dayStart(input.from)}Z` : undefined,
+    'starts_from.date_time.lte': typeof input.to === 'string' ? `${dayEnd(input.to)}Z` : undefined,
+  });
+  return listResult(body, ABSENCE);
+}
+
+async function attendancePeriods(client: PersonioClient, input: Record<string, unknown>, personId: string | undefined) {
+  const body = await client.get('/v2/attendance-periods', {
+    ...pageQuery(input, 100, 100),
+    'person.id': personId,
+    'start.date_time.gte': typeof input.from === 'string' ? dayStart(input.from) : undefined,
+    'start.date_time.lte': typeof input.to === 'string' ? dayEnd(input.to) : undefined,
+  });
+  return listResult(body, ATTENDANCE);
+}
+
+const absenceShape = {
+  absenceTypeId: id,
+  startDate: date,
+  startHalf: half.optional(),
+  endDate: date.optional(),
+  endHalf: half.optional(),
+};
+
+async function createAbsence(client: PersonioClient, input: Record<string, unknown>, personId: string) {
+  if (typeof input.endDate === 'string' && input.endDate < (input.startDate as string)) {
+    throw new GatewayInputError('endDate is before startDate. Nothing was sent to Personio.');
+  }
+  if (input.endHalf !== undefined && input.endDate === undefined) {
+    throw new GatewayInputError('endHalf needs endDate. Nothing was sent to Personio.');
+  }
+  // skip_approval is never sent: Personio's default (false) puts the period through its approval workflow.
+  const body = await client.post('/v2/absence-periods', {
+    person: { id: personId },
+    absence_type: { id: input.absenceTypeId },
+    starts_from: { date_time: dayStart(input.startDate as string), ...(input.startHalf ? { type: input.startHalf } : {}) },
+    ...(input.endDate
+      ? { ends_at: { date_time: dayStart(input.endDate as string), ...(input.endHalf ? { type: input.endHalf } : {}) } }
+      : {}),
+  });
+  return { created: single(body, ABSENCE) };
+}
+
+const attendanceShape = {
+  type: z.enum(['WORK', 'BREAK']),
+  start: localDateTime,
+  end: localDateTime,
+  projectId: id.optional(),
+};
+
+async function createAttendance(client: PersonioClient, input: Record<string, unknown>, personId: string) {
+  // Wall-clock times: read as if in UTC, so the host's own timezone (and its daylight saving) plays no part.
+  const start = Date.parse(`${withSeconds(input.start as string)}Z`);
+  const end = Date.parse(`${withSeconds(input.end as string)}Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 24 * 60 * 60 * 1000) {
+    throw new GatewayInputError('The period must end after it starts and last at most 24 hours. Nothing was sent to Personio.');
+  }
+  if (input.projectId !== undefined && input.type === 'BREAK') {
+    throw new GatewayInputError('A project can only be set on a WORK period. Nothing was sent to Personio.');
+  }
+  // skip_approval is never sent.
+  const body = await client.post('/v2/attendance-periods', {
+    person: { id: personId },
+    type: input.type,
+    start: { date_time: withSeconds(input.start as string) },
+    end: { date_time: withSeconds(input.end as string) },
+    ...(input.projectId ? { project: { id: input.projectId } } : {}),
+  });
+  return { created: single(body, ATTENDANCE) };
+}
+
+/** The person id a self tool was given by the gateway; a self tool never runs without one. */
+function selfId(self: string | undefined): string {
+  if (typeof self !== 'string' || self === '') throw new ActAsRefusedError('invalid');
+  return self;
+}
+
+/** The lookup a self tool makes first (resolveSelf). */
+const FIND_SELF: UpstreamOperation = { method: 'GET', path: '/v2/persons' };
+
 export const GATEWAY_TOOLS: readonly GatewayTool[] = [
   {
     name: 'check_connection',
@@ -364,22 +504,7 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     ],
     summary: 'Person from Personio (standard fields only).',
     async run(client, input) {
-      const personId = pathParam(input.personId as string, 'personId');
-      const person = single(await client.get(`/v2/persons/${personId}`), PERSON);
-      // Every page of employments, up to EMPLOYMENT_MAX_PAGES; complete says whether all were read.
-      const employments: Array<Record<string, unknown>> = [];
-      let next: string | undefined;
-      let complete = false;
-      for (let page = 0; page < EMPLOYMENT_MAX_PAGES; page += 1) {
-        const body = await client.get(`/v2/persons/${personId}/employments`, { limit: 50, cursor: next });
-        employments.push(...rowsOf(body, EMPLOYMENT));
-        next = nextCursor(body);
-        if (!next) {
-          complete = true;
-          break;
-        }
-      }
-      return { person, employments, employmentsComplete: complete };
+      return personWithEmployments(client, input.personId as string);
     },
   },
   {
@@ -399,15 +524,7 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     upstream: [TOKEN, { method: 'GET', path: '/v2/absence-periods' }],
     summary: 'Absence periods from Personio (without type or comment).',
     async run(client, input) {
-      const body = await client.get('/v2/absence-periods', {
-        ...pageQuery(input, 100, 100),
-        'person.id': input.personId as string | undefined,
-        // A period overlaps [from, to] when it ends on or after from and starts on or before to. Personio documents these
-        // filters with a UTC instant (…Z), unlike the attendance filters.
-        'ends_at.date_time.gte': typeof input.from === 'string' ? `${dayStart(input.from)}Z` : undefined,
-        'starts_from.date_time.lte': typeof input.to === 'string' ? `${dayEnd(input.to)}Z` : undefined,
-      });
-      return listResult(body, ABSENCE);
+      return absencePeriods(client, input, input.personId as string | undefined);
     },
   },
   {
@@ -427,13 +544,7 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
     upstream: [TOKEN, { method: 'GET', path: '/v2/attendance-periods' }],
     summary: 'Attendance periods from Personio (without comment).',
     async run(client, input) {
-      const body = await client.get('/v2/attendance-periods', {
-        ...pageQuery(input, 100, 100),
-        'person.id': input.personId as string | undefined,
-        'start.date_time.gte': typeof input.from === 'string' ? dayStart(input.from) : undefined,
-        'start.date_time.lte': typeof input.to === 'string' ? dayEnd(input.to) : undefined,
-      });
-      return listResult(body, ATTENDANCE);
+      return attendancePeriods(client, input, input.personId as string | undefined);
     },
   },
   {
@@ -443,34 +554,12 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       'Creates an absence period for a person (absence type, start, end, half days). It enters Personio’s normal approval workflow; approval cannot be skipped.',
     risk: 'write',
     inputSchema: z
-      .object({
-        personId: id,
-        absenceTypeId: id,
-        startDate: date,
-        startHalf: half.optional(),
-        endDate: date.optional(),
-        endHalf: half.optional(),
-      })
+      .object({ personId: id, ...absenceShape })
       .strict(),
     upstream: [TOKEN, { method: 'POST', path: '/v2/absence-periods' }],
     summary: 'Personio created the absence period; it follows Personio’s approval workflow.',
     async run(client, input) {
-      if (typeof input.endDate === 'string' && input.endDate < (input.startDate as string)) {
-        throw new GatewayInputError('endDate is before startDate. Nothing was sent to Personio.');
-      }
-      if (input.endHalf !== undefined && input.endDate === undefined) {
-        throw new GatewayInputError('endHalf needs endDate. Nothing was sent to Personio.');
-      }
-      // skip_approval is never sent: Personio's default (false) puts the period through its approval workflow.
-      const body = await client.post('/v2/absence-periods', {
-        person: { id: input.personId },
-        absence_type: { id: input.absenceTypeId },
-        starts_from: { date_time: dayStart(input.startDate as string), ...(input.startHalf ? { type: input.startHalf } : {}) },
-        ...(input.endDate
-          ? { ends_at: { date_time: dayStart(input.endDate as string), ...(input.endHalf ? { type: input.endHalf } : {}) } }
-          : {}),
-      });
-      return { created: single(body, ABSENCE) };
+      return createAbsence(client, input, input.personId as string);
     },
   },
   {
@@ -480,35 +569,87 @@ export const GATEWAY_TOOLS: readonly GatewayTool[] = [
       'Records a work or break period for a person (start and end as local date and time without a timezone, at most 24 hours, project for work only). It enters Personio’s normal approval workflow.',
     risk: 'write',
     inputSchema: z
-      .object({
-        personId: id,
-        type: z.enum(['WORK', 'BREAK']),
-        start: localDateTime,
-        end: localDateTime,
-        projectId: id.optional(),
-      })
+      .object({ personId: id, ...attendanceShape })
       .strict(),
     upstream: [TOKEN, { method: 'POST', path: '/v2/attendance-periods' }],
     summary: 'Personio recorded the attendance period; it follows Personio’s approval workflow.',
     async run(client, input) {
-      // Wall-clock times: read as if in UTC, so the host's own timezone (and its daylight saving) plays no part.
-      const start = Date.parse(`${withSeconds(input.start as string)}Z`);
-      const end = Date.parse(`${withSeconds(input.end as string)}Z`);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 24 * 60 * 60 * 1000) {
-        throw new GatewayInputError('The period must end after it starts and last at most 24 hours. Nothing was sent to Personio.');
-      }
-      if (input.projectId !== undefined && input.type === 'BREAK') {
-        throw new GatewayInputError('A project can only be set on a WORK period. Nothing was sent to Personio.');
-      }
-      // skip_approval is never sent.
-      const body = await client.post('/v2/attendance-periods', {
-        person: { id: input.personId },
-        type: input.type,
-        start: { date_time: withSeconds(input.start as string) },
-        end: { date_time: withSeconds(input.end as string) },
-        ...(input.projectId ? { project: { id: input.projectId } } : {}),
-      });
-      return { created: single(body, ATTENDANCE) };
+      return createAttendance(client, input, input.personId as string);
+    },
+  },
+  {
+    name: 'get_my_profile',
+    title: 'Get my profile',
+    description:
+      'Your own person in Personio with standard fields and employments: position, status, dates, weekly hours, supervisor, legal entity, office, departments and teams.',
+    risk: 'read',
+    self: true,
+    inputSchema: z.object({}).strict(),
+    upstream: [
+      TOKEN,
+      FIND_SELF,
+      { method: 'GET', path: '/v2/persons/{personId}' },
+      { method: 'GET', path: '/v2/persons/{personId}/employments' },
+    ],
+    summary: 'Your own person from Personio (standard fields only).',
+    async run(client, _input, self) {
+      return personWithEmployments(client, selfId(self));
+    },
+  },
+  {
+    name: 'list_my_absences',
+    title: 'List my absences',
+    description:
+      'Your own absence periods: start, end (half days included), timezone and approval status. The absence type and the comment are left out. Filter by a date range (from, to): periods that overlap it.',
+    risk: 'read',
+    self: true,
+    inputSchema: z.object({ from: date.optional(), to: date.optional(), ...pageShape(100) }).strict(),
+    upstream: [TOKEN, FIND_SELF, { method: 'GET', path: '/v2/absence-periods' }],
+    summary: 'Your own absence periods from Personio (without type or comment).',
+    async run(client, input, self) {
+      return absencePeriods(client, input, selfId(self));
+    },
+  },
+  {
+    name: 'list_my_attendances',
+    title: 'List my attendances',
+    description:
+      'Your own recorded work and break periods: type, start, end, duration, project and approval status. The comment is left out. Filter by the days they start on (from, to).',
+    risk: 'read',
+    self: true,
+    inputSchema: z.object({ from: date.optional(), to: date.optional(), ...pageShape(100) }).strict(),
+    upstream: [TOKEN, FIND_SELF, { method: 'GET', path: '/v2/attendance-periods' }],
+    summary: 'Your own attendance periods from Personio (without comment).',
+    async run(client, input, self) {
+      return attendancePeriods(client, input, selfId(self));
+    },
+  },
+  {
+    name: 'create_my_absence',
+    title: 'Request my absence',
+    description:
+      'Creates an absence period for yourself (absence type, start, end, half days). It enters Personio’s normal approval workflow; approval cannot be skipped.',
+    risk: 'write',
+    self: true,
+    inputSchema: z.object(absenceShape).strict(),
+    upstream: [TOKEN, FIND_SELF, { method: 'POST', path: '/v2/absence-periods' }],
+    summary: 'Personio created your absence period; it follows Personio’s approval workflow.',
+    async run(client, input, self) {
+      return createAbsence(client, input, selfId(self));
+    },
+  },
+  {
+    name: 'create_my_attendance',
+    title: 'Record my attendance',
+    description:
+      'Records a work or break period for yourself (start and end as local date and time without a timezone, at most 24 hours, project for work only). It enters Personio’s normal approval workflow.',
+    risk: 'write',
+    self: true,
+    inputSchema: z.object(attendanceShape).strict(),
+    upstream: [TOKEN, FIND_SELF, { method: 'POST', path: '/v2/attendance-periods' }],
+    summary: 'Personio recorded your attendance period; it follows Personio’s approval workflow.',
+    async run(client, input, self) {
+      return createAttendance(client, input, selfId(self));
     },
   },
 ];
