@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 (2026-11-22)
+
+- Gateway: acting as the person. The call context takes `actAs: { email,
+  name? }` (`src/act-as.ts`, as in mcp-server-template). Five self tools,
+  marked `self: true` in the catalog, work only on that person, found by
+  work email (exactly one person, not inactive): `get_my_profile`,
+  `list_my_absences`, `list_my_attendances`, `create_my_absence` and
+  `create_my_attendance`. Their input never names a person. No single
+  active person with the email gives `actAsRefused: 'no_user'`; a self tool
+  without `actAs`, or a malformed `actAs`, gives `actAsRefused: 'invalid'`.
+  Nothing is sent in either case. The email is never audited or put in our
+  texts. The company-wide tools are unchanged and ignore `actAs`.
+
 ## 0.5.1 (2026-11-21)
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,

@@ -65,6 +65,11 @@ describe('catalog', () => {
       'list_attendances',
       'create_absence',
       'create_attendance',
+      'get_my_profile',
+      'list_my_absences',
+      'list_my_attendances',
+      'create_my_absence',
+      'create_my_attendance',
     ]);
     for (const entry of personioToolCatalog) {
       expect(entry.broad).toBe(false);

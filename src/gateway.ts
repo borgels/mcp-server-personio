@@ -1,4 +1,5 @@
 import { z } from 'zod/v4';
+import { ActAsRefusedError, actAsRefusalInForm, normaliseActAs, type ActAs, type ActAsRefusal } from './act-as.js';
 import { ConfigError } from './config-env.js';
 import { failureMetadata, PersonioHttpError, vendorRequestId, type FailureMetadata } from './errors.js';
 import { fixedOutputs, withheldAuditRecord, withheldResult } from './fallbacks.js';
@@ -9,6 +10,7 @@ import {
   findGatewayTool,
   GATEWAY_TOOLS,
   GatewayInputError,
+  resolveSelf,
   type GatewayTool,
   type UpstreamOperation,
 } from './gateway/tools.js';
@@ -34,6 +36,15 @@ import {
  * PERSONIO_AUDIT_LOG (the host's `policy` instead; without it writes are off
  * and nothing is audited).
  *
+ * Acting as the person (src/act-as.ts): the host may give `actAs` (the
+ * person's verified email) in the call context. The self tools (catalog
+ * `self: true`) need it: they find exactly one active person with that work
+ * email and read or create only that person's own data. Without `actAs`, or
+ * when no single active person has the address, a self tool sends nothing
+ * and answers with `actAsRefused`; it never falls back to another person or
+ * to the company-wide tools. The company-wide tools ignore `actAs`. The
+ * email is never audited or put in a text of ours.
+ *
  * Errors carry the HTTP status and our own text only, never Personio's
  * response body. Every output (results, errors, the tool list, audit
  * records) is redacted with the instance's own secrets and passes the sink
@@ -41,6 +52,13 @@ import {
  */
 
 export const DEFAULT_BASE_URL = 'https://api.personio.de';
+
+export { ACT_AS_REFUSALS, ACT_AS_TEXTS } from './act-as.js';
+
+/** The person a call is made for (GatewayCallContext.actAs; see src/act-as.ts). */
+export type GatewayActAs = ActAs;
+/** Why a call was not made as the person: `invalid` actAs, `no_user` in Personio, or `not_permitted`. */
+export type GatewayActAsRefusal = ActAsRefusal;
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 export type GatewayRiskLevel = 'read' | 'write' | 'destructive';
@@ -69,6 +87,12 @@ export interface GatewayToolResult {
   isError?: boolean;
   /** On an error result from Personio only: its HTTP status and request id (see GatewayFailure). */
   failure?: GatewayFailure;
+  /**
+   * On an error result only: the call was not made, because it could not be made as the person in `actAs` (a self
+   * tool without a valid `actAs`, or no single active person with the email). The text is fixed and never holds the
+   * email.
+   */
+  actAsRefused?: GatewayActAsRefusal;
 }
 
 export interface GatewayCallContext {
@@ -76,6 +100,11 @@ export interface GatewayCallContext {
   caller?: string;
   /** The host's id for this call; goes into audit records. */
   requestId?: string;
+  /**
+   * The person the call is made for, as the host verified them (src/act-as.ts). Needed by the self tools, ignored by
+   * the others. Never audited and never sent to Personio except as the filter that finds the person.
+   */
+  actAs?: GatewayActAs;
 }
 
 /** Deeply read-only JSON, as found in the frozen tool catalog. */
@@ -102,6 +131,8 @@ export interface GatewayToolCatalogEntry {
   readonly broad: boolean;
   /** True for a tool a person should confirm outside the chat. False for every tool here: none moves money. */
   readonly requiresConfirmation: boolean;
+  /** True for a self tool: it works only on the person in `actAs` and takes no person in its input. */
+  readonly self: boolean;
 }
 
 /** Receives one audit record. With a sink, a write runs only if its start record was accepted. */
@@ -182,6 +213,7 @@ export const personioToolCatalog: readonly GatewayToolCatalogEntry[] = deepFreez
     upstream: tool.upstream.map(operation => ({ ...operation })),
     broad: false,
     requiresConfirmation: false,
+    self: tool.self === true,
   })),
 );
 
@@ -296,13 +328,20 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
     await policy.audit(Object.freeze(leaksSecret(final, redactor) ? withheldAuditRecord() : final));
   }
 
-  async function runCall(toolName: string, input: GatewayJsonObject, context?: GatewayCallContext): Promise<GatewayToolResult> {
+  async function runCall(
+    toolName: string,
+    input: GatewayJsonObject,
+    context: GatewayCallContext | undefined,
+    actAs: Readonly<ActAs> | undefined,
+  ): Promise<GatewayToolResult> {
     const tool = typeof toolName === 'string' ? findGatewayTool(toolName) : undefined;
     if (!tool) return errorResult('Unsupported Personio gateway tool.');
     if (policy.disabledTools.has(tool.name)) return errorResult(`The tool ${tool.name} is disabled on this instance by the embedding host.`);
     if (tool.risk === 'write' && !policy.enableWrites) {
       return errorResult(`The write tool ${tool.name} is disabled: the embedding host has not enabled writes for this instance.`);
     }
+    // A self tool runs only for a person the host gave: never for the company, never for someone else.
+    if (tool.self && !actAs) return actAsRefused('invalid');
     const parsed = tool.inputSchema.safeParse(input ?? {});
     if (!parsed.success) return errorResult(redactor.redact(`Invalid input for ${tool.name}: ${z.prettifyError(parsed.error)}`));
     const requestId = typeof context?.requestId === 'string' && /^[\x21-\x7e]{1,128}$/.test(context.requestId) ? context.requestId : undefined;
@@ -314,10 +353,16 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
       if (tool.risk === 'write') return errorResult('The audit record could not be written, so the change was not sent to Personio.');
     }
     try {
-      const data = await tool.run(client, parsed.data as Record<string, unknown>);
+      // The person is found first, by the email only; a self tool gets the person id, never anything from the input.
+      const self = tool.self && actAs ? await resolveSelf(client, actAs.email) : undefined;
+      const data = await tool.run(client, parsed.data as Record<string, unknown>, self);
       await audit({ timestamp: new Date().toISOString(), ...base, action: 'finish' }).catch(() => undefined);
       return { content: [{ type: 'text', text: tool.summary }], structuredContent: (data ?? null) as GatewayJsonValue };
     } catch (error) {
+      if (error instanceof ActAsRefusedError) {
+        await audit({ timestamp: new Date().toISOString(), ...base, action: 'refused', reason: error.refusal }).catch(() => undefined);
+        return actAsRefused(error.refusal);
+      }
       const text = errorText(error, tool.risk === 'write');
       await audit({ timestamp: new Date().toISOString(), ...base, action: 'error', status: statusOf(error) ?? null }).catch(() => undefined);
       return errorResult(text, failureMetadata(error));
@@ -328,7 +373,15 @@ function buildGateway(options: PersonioGatewayOptions, clientId: string, clientS
     /** Tools enabled on this instance (the policy's disabled tools are left out). */
     tools,
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
-      return runCall(toolName, input, context).then(result => {
+      // The person to act as, checked before anything else: a malformed one refuses the call, so it never runs as
+      // anyone else by mistake.
+      let actAs: Readonly<ActAs> | undefined;
+      try {
+        actAs = normaliseActAs(context?.actAs);
+      } catch {
+        return Promise.resolve(actAsRefused('invalid'));
+      }
+      return runCall(toolName, input, context, actAs).then(result => {
         // Redacted as data, copied as JSON, the data also put in the text, then the sink check on the final form.
         // The failure metadata is checked again after redaction: an id that redaction changed is dropped.
         const final = withDataInText(
@@ -389,6 +442,11 @@ function withDataInText(result: GatewayToolResult): GatewayToolResult {
   };
 }
 
+/** A call not made as the person: our fixed text and the refusal, nothing else. */
+function actAsRefused(refusal: ActAsRefusal): GatewayToolResult {
+  return { ...errorResult(new ActAsRefusedError(refusal).message), actAsRefused: refusal };
+}
+
 function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult {
   return { isError: true, content: [{ type: 'text', text }], ...(failure ? { failure } : {}) };
 }
@@ -398,7 +456,10 @@ function errorResult(text: string, failure?: GatewayFailure): GatewayToolResult 
  * still in the form of one (redaction can have changed it). Anything else is dropped, never passed on.
  */
 function withFailureInForm(result: GatewayToolResult): GatewayToolResult {
-  const { failure, ...rest } = result;
+  const { failure, actAsRefused: refusal, ...withoutRefusal } = result;
+  // The refusal stays only on an error result, and only as one of ours.
+  const kept = result.isError ? actAsRefusalInForm(refusal) : undefined;
+  const rest: GatewayToolResult = kept ? { ...withoutRefusal, actAsRefused: kept } : withoutRefusal;
   if (!result.isError || failure === undefined || failure === null || typeof failure !== 'object') return rest;
   const status = failure.httpStatus;
   if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return rest;
